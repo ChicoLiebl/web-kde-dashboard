@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg">
+<title>Desktops</title>
+<style>
+  :root {
+    --bg: #0f1115; --card: #181b22; --line: #2a2f3a;
+    --text: #e6e8ee; --muted: #8b93a5; --current: #dfe5f2;
+    --working: #4c8dff; --waiting: #ffcc00; --waiting-bg: #3d3200; --unknown: #8b93a5;
+    --gap: 10px; --blink: 1.2s;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 15px/1.3 system-ui, -apple-system, "Noto Sans", sans-serif; }
+  body { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; }
+  header { display: flex; align-items: center; gap: 14px; padding: 8px 12px 0; flex: none; flex-wrap: wrap; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; color: var(--muted); }
+  .stat { color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: 6px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  .conn { margin-left: auto; font-size: 12px; color: var(--muted); }
+  .conn.off { color: #ff6b6b; }
+  .fs { padding: 4px 10px; font-size: 13px; font-weight: 600; background: #232833; color: var(--muted); }
+
+  /* Grid: columns/rows are set from JS so cards are as large as the screen allows. */
+  main { flex: 1; min-height: 0; display: grid; gap: var(--gap); padding: var(--gap); }
+
+  .desk, .next { container-type: size; min-width: 0; min-height: 0; overflow: hidden;
+    border-radius: 16px; cursor: pointer; transition: transform .08s; user-select: none; }
+  .desk:active, .next:active { transform: scale(.985); }
+  .desk { background: var(--card); border: 2px solid var(--line);
+    padding: clamp(8px, 3cqmin, 20px); display: flex; flex-direction: column; gap: clamp(6px, 2cqmin, 14px); }
+  .desk.working { border-color: var(--working); }
+  .desk.current { border-color: var(--current); }
+  .desk.waiting { border-color: var(--waiting); background: var(--waiting-bg); }
+  .desk.waiting.blink { animation: blink var(--blink) ease-in-out infinite; }
+  @keyframes blink {
+    0%, 100% { background: var(--waiting-bg); border-color: var(--waiting); }
+    50% { background: var(--card); border-color: #6b5600; }
+  }
+
+  .desk-head { display: flex; align-items: center; gap: .5em; font-size: clamp(16px, 11cqmin, 80px); }
+  .desk-num { font-weight: 800; color: var(--muted); line-height: 1; }
+  .current .desk-num { color: var(--current); }
+  .waiting .desk-num { color: var(--waiting); }
+  .desk-name { font-weight: 600; font-size: .45em; color: var(--muted);
+    flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .here { font-size: .28em; font-weight: 700; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--bg); background: var(--current); padding: .2em .6em; border-radius: 99px; }
+
+  .claudes { display: flex; flex-direction: column; gap: clamp(4px, 1.5cqmin, 10px); min-height: 0; }
+  .claude { background: rgba(0,0,0,.28); border-radius: 10px; border-left: 5px solid var(--unknown);
+    padding: clamp(6px, 2cqmin, 14px) clamp(8px, 2.5cqmin, 16px); }
+  .claude.working { border-left-color: var(--working); }
+  .claude.done, .claude.blocked { border-left-color: var(--waiting); }
+  .claude.snoozed { opacity: .6; }
+  .claude-top { display: flex; align-items: center; gap: .5em; font-size: clamp(15px, 7.5cqmin, 52px); }
+  .project { font-weight: 700; font-family: ui-monospace, "JetBrains Mono", monospace;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .pill { font-family: system-ui, sans-serif; font-size: .4em; font-weight: 800; text-transform: uppercase;
+    letter-spacing: .05em; padding: .25em .7em; border-radius: 99px; color: #111; background: var(--unknown); flex: none; }
+  .working .pill { background: var(--working); color: #fff; }
+  .done .pill, .blocked .pill { background: var(--waiting); }
+  .blocked .pill { outline: 2px solid var(--waiting); outline-offset: 2px; }
+  .snoozed .pill { background: #3a404d; color: var(--muted); }
+  /* In cards the status sits on its own line, about as big as the project name. */
+  .cstatus { font-size: clamp(15px, 7.5cqmin, 52px); margin-top: .15em; line-height: 1.15; }
+  .cstatus .pill { display: inline-block; font-size: .8em; letter-spacing: .04em;
+    padding: .1em .55em; border-radius: .35em; outline-width: .12em; outline-offset: .12em; }
+  .ctitle { color: #b9c0cf; font-size: clamp(12px, 5cqmin, 30px); margin-top: .2em;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+  .apps { display: flex; flex-wrap: wrap; gap: .4em; font-size: clamp(11px, 4cqmin, 24px); margin-top: auto; }
+  .app { background: #232833; color: #c3c8d4; padding: .25em .6em; border-radius: 6px;
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .app b { font-weight: 600; color: var(--text); }
+  .app.active { outline: 1px solid var(--current); }
+
+  .next { border: 2px dashed var(--line); background: transparent; color: var(--muted);
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .3em;
+    font-size: clamp(13px, 5cqmin, 30px); font-weight: 600; text-align: center; padding: 8px; }
+  .next .plus { font-size: 2.2em; line-height: 1; font-weight: 300; }
+  .next .sub { font-size: .6em; font-weight: 500; }
+  .next.none { opacity: .4; cursor: default; }
+
+  .msg { margin: auto; color: var(--muted); text-align: center; padding: 16px; }
+
+  /* Long-press sheet */
+  .desk, .next { -webkit-touch-callout: none; }
+  .backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none;
+    align-items: center; justify-content: center; padding: 16px; z-index: 10; }
+  .backdrop.open { display: flex; }
+  .sheet { background: #1c2029; border: 1px solid var(--line); border-radius: 16px; padding: 18px;
+    width: min(560px, 100%); max-height: 100%; overflow: auto; display: flex; flex-direction: column; gap: 12px; }
+  .sheet h2 { margin: 0; font-size: 20px; }
+  .sheet .row { display: flex; align-items: center; gap: 12px; background: rgba(0,0,0,.25);
+    border-radius: 10px; padding: 10px 12px; border-left: 5px solid var(--unknown); }
+  .sheet .row.working { border-left-color: var(--working); }
+  .sheet .row.done, .sheet .row.blocked { border-left-color: var(--waiting); }
+  .sheet .who { flex: 1; min-width: 0; }
+  .sheet .who b { font-family: ui-monospace, "JetBrains Mono", monospace; font-size: 16px; }
+  .sheet .who div { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sheet .pill { font-size: 11px; }
+  .sheet .actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+  button { font: inherit; font-weight: 600; font-size: 15px; border: 0; border-radius: 10px;
+    padding: 10px 16px; background: #2c3240; color: var(--text); cursor: pointer; }
+  button.primary { background: var(--waiting); color: #111; }
+  .sheet .none { color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="host">Desktops</h1>
+  <span class="stat"><span class="dot" style="background:var(--waiting)"></span><span id="n-idle">0</span> waiting</span>
+  <span class="stat"><span class="dot" style="background:var(--working)"></span><span id="n-working">0</span> working</span>
+  <span class="conn off" id="conn">connecting…</span>
+  <button class="fs" id="fs" hidden>⛶ Fullscreen</button>
+</header>
+<main id="grid"><div class="msg">Waiting for KWin…</div></main>
+<div class="backdrop" id="backdrop"><div class="sheet" id="sheet"></div></div>
+<script>
+// Token: from ?t= on first open, then remembered so the home-screen shortcut keeps working.
+let token = new URLSearchParams(location.search).get("t");
+try { if (token) localStorage.setItem("kddash-token", token); else token = localStorage.getItem("kddash-token"); } catch {}
+
+const grid = document.getElementById("grid");
+const conn = document.getElementById("conn");
+const BLINK_MS = 1200;
+const ASPECT = 1.35;  // preferred card width/height when choosing the grid shape
+
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const label = { working: "working", blocked: "needs you", done: "waiting", unknown: "claude", snoozed: "idle" };
+const LONG_PRESS_MS = 500;
+let last = null;      // latest state from the server
+let sheetDesk = null; // desktop id whose long-press sheet is open
+
+const isAlert = c => !c.snoozed && (c.status === "done" || c.status === "blocked");
+const cstate = c => c.snoozed ? "snoozed" : c.status;
+const sessionsOn = (s, deskId) => s.windows.filter(w => w.claude && w.desktops.includes(deskId))
+  .flatMap(w => w.claude.map(c => ({ ...c, window: w })));
+
+function api(path, params) {
+  fetch(`api/${path}?t=${encodeURIComponent(token)}&${new URLSearchParams(params)}`, { method: "POST" });
+  if (navigator.vibrate) navigator.vibrate(15);
+}
+const post = params => api("activate", params);
+const snooze = (pid, on) => api("snooze", { pid, on: on ? 1 : 0 });
+
+// Pick the column count that gives the biggest cards for n tiles in the available area.
+function layout() {
+  const n = grid.querySelectorAll(".desk, .next").length;
+  if (!n) { grid.style.gridTemplateColumns = grid.style.gridTemplateRows = ""; return; }
+  const gap = parseFloat(getComputedStyle(grid).gap) || 0;
+  const W = grid.clientWidth - 2 * gap, H = grid.clientHeight - 2 * gap;
+  let best = { score: -1, cols: 1, rows: n };
+  for (let cols = 1; cols <= n; cols++) {
+    const rows = Math.ceil(n / cols);
+    const cw = (W - (cols - 1) * gap) / cols, ch = (H - (rows - 1) * gap) / rows;
+    const score = Math.min(cw / ASPECT, ch);
+    if (score > best.score) best = { score, cols, rows };
+  }
+  grid.style.gridTemplateColumns = `repeat(${best.cols}, minmax(0, 1fr))`;
+  grid.style.gridTemplateRows = `repeat(${best.rows}, minmax(0, 1fr))`;
+}
+new ResizeObserver(layout).observe(grid);
+
+function subtitle(c) {
+  return c.status === "blocked" && c.waitingFor ? `⚠ ${c.waitingFor} · ${c.title}` : c.title;
+}
+
+function render(s) {
+  last = s;
+  document.getElementById("host").textContent = s.host || "Desktops";
+  if (!s.desktops?.length) return;
+  let working = 0, waiting = 0;
+  const curIdx = s.desktops.findIndex(d => d.id === s.current);
+  // Keep the blink phase continuous across re-renders (updates arrive several times a second).
+  const phase = `animation-delay:-${Date.now() % BLINK_MS}ms`;
+
+  const cards = s.desktops.map((d, i) => {
+    const wins = s.windows.filter(w => w.desktops.includes(d.id));
+    if (!wins.length) return "";
+    const claudes = sessionsOn(s, d.id), others = wins.filter(w => !w.claude);
+    const alerts = claudes.filter(isAlert);
+    working += claudes.filter(c => c.status === "working").length;
+    waiting += alerts.length;
+    // Blink until you look at it: a waiting session whose window is focused stays solid yellow.
+    const blink = alerts.some(c => !c.window.active);
+    const cls = ["desk",
+      d.id === s.current && "current",
+      claudes.some(c => c.status === "working") && "working",
+      alerts.length && "waiting", blink && "blink"].filter(Boolean).join(" ");
+    const sessions = claudes.map(c => `
+      <div class="claude ${cstate(c)}" data-window="${esc(c.window.id)}">
+        <div class="claude-top"><span class="project">${esc(c.project)}</span></div>
+        <div class="cstatus"><span class="pill">${label[cstate(c)]}</span></div>
+        <div class="ctitle">${esc(subtitle(c))}</div>
+      </div>`).join("");
+    const apps = others.map(w =>
+      `<span class="app${w.active ? " active" : ""}" data-window="${esc(w.id)}" title="${esc(w.caption)}"><b>${esc(w.cls)}</b> ${esc(w.caption)}</span>`).join("");
+    return `<section class="${cls}" data-desktop="${esc(d.id)}" ${blink ? `style="${phase}"` : ""}>
+      <div class="desk-head"><span class="desk-num">${i + 1}</span><span class="desk-name">${esc(d.name)}</span>
+        ${d.id === s.current ? `<span class="here">here</span>` : ""}</div>
+      ${sessions ? `<div class="claudes">${sessions}</div>` : ""}
+      ${apps ? `<div class="apps">${apps}</div>` : ""}
+    </section>`;
+  }).join("");
+
+  // "Next empty desktop": first empty one after the current desktop, wrapping around.
+  const isEmpty = d => !s.windows.some(w => w.desktops.includes(d.id));
+  const order = s.desktops.map((_, k) => s.desktops[(curIdx + 1 + k) % s.desktops.length]);
+  const empty = order.find(isEmpty);
+  const idx = empty ? s.desktops.indexOf(empty) : -1;
+  const next = empty
+    ? `<section class="next" data-desktop="${esc(empty.id)}"><span class="plus">+</span>Empty desktop<span class="sub">go to ${idx + 1} · ${esc(empty.name)}</span></section>`
+    : `<section class="next none"><span class="plus">∅</span>No empty desktop</section>`;
+
+  grid.innerHTML = cards + next;
+  layout();
+  document.getElementById("n-working").textContent = working;
+  document.getElementById("n-idle").textContent = waiting;
+  document.title = waiting ? `(${waiting}) Desktops` : "Desktops";
+  if (sheetDesk) renderSheet();
+}
+
+// ---- long-press sheet: mark sessions idle so they stop alerting until their next turn
+
+const backdrop = document.getElementById("backdrop"), sheet = document.getElementById("sheet");
+
+function renderSheet() {
+  const s = last, i = s.desktops.findIndex(d => d.id === sheetDesk);
+  if (i < 0) return closeSheet();
+  const claudes = sessionsOn(s, sheetDesk);
+  const alerting = claudes.filter(isAlert);
+  const rows = claudes.map(c => {
+    const btn = c.snoozed ? `<button data-snooze="${c.pid}" data-on="0">Unmark</button>`
+      : isAlert(c) ? `<button class="primary" data-snooze="${c.pid}" data-on="1">Mark idle</button>` : "";
+    return `<div class="row ${cstate(c)}"><div class="who"><b>${esc(c.project)}</b> <span class="pill">${label[cstate(c)]}</span>
+      <div>${esc(subtitle(c))}</div></div>${btn}</div>`;
+  }).join("");
+  sheet.innerHTML = `<h2>${i + 1} · ${esc(s.desktops[i].name)}</h2>
+    ${rows || `<div class="none">No Claude sessions on this desktop.</div>`}
+    <div class="actions">
+      ${alerting.length > 1 ? `<button class="primary" data-snooze-all>Mark all idle</button>` : ""}
+      <button data-go>Go to desktop</button><button data-close>Close</button>
+    </div>`;
+}
+
+function openSheet(deskId) { sheetDesk = deskId; renderSheet(); backdrop.classList.add("open"); }
+function closeSheet() { sheetDesk = null; backdrop.classList.remove("open"); }
+
+backdrop.addEventListener("click", e => {
+  const b = e.target.closest("button");
+  if (e.target === backdrop || b?.dataset.close !== undefined) return closeSheet();
+  if (!b) return;
+  if (b.dataset.snooze) return snooze(b.dataset.snooze, b.dataset.on === "1");
+  if (b.dataset.snoozeAll !== undefined) return sessionsOn(last, sheetDesk).filter(isAlert).forEach(c => snooze(c.pid, true));
+  if (b.dataset.go !== undefined) { post({ desktop: sheetDesk }); closeSheet(); }
+});
+
+// Taps and long-presses are resolved from the element under the finger at pointerdown:
+// the grid re-renders several times a second, so a plain "click" can land on a replaced node.
+let press = null;
+grid.addEventListener("pointerdown", e => {
+  if (e.button !== 0) return;
+  const target = e.target.closest("[data-desktop]");
+  if (!target) return;
+  const win = e.target.closest("[data-window]");
+  press = { x: e.clientX, y: e.clientY, desktop: target.dataset.desktop, window: win?.dataset.window, timer: null };
+  if (target.classList.contains("desk")) {
+    const p = press;
+    p.timer = setTimeout(() => {
+      p.timer = null; p.long = true;
+      if (navigator.vibrate) navigator.vibrate(30);
+      openSheet(p.desktop);
+    }, LONG_PRESS_MS);
+  }
+});
+grid.addEventListener("pointermove", e => {
+  if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > 10) { clearTimeout(press.timer); press = null; }
+});
+grid.addEventListener("pointercancel", () => { if (press) clearTimeout(press.timer); press = null; });
+grid.addEventListener("pointerup", () => {
+  if (!press) return;
+  const p = press; press = null;
+  clearTimeout(p.timer);
+  if (p.long) return;
+  post(p.window ? { window: p.window } : { desktop: p.desktop });
+});
+grid.addEventListener("contextmenu", e => {  // right-click on desktop; also blocks Android's long-press menu
+  e.preventDefault();
+  const desk = e.target.closest(".desk");
+  if (desk && !sheetDesk) openSheet(desk.dataset.desktop);
+});
+
+function connect() {
+  if (!token) { grid.innerHTML = `<div class="msg">Open the URL printed by <code>kddash.py</code> (it includes ?t=…)</div>`; return; }
+  const es = new EventSource(`events?t=${encodeURIComponent(token)}`);
+  es.onopen = () => { conn.textContent = "live"; conn.classList.remove("off"); };
+  es.onmessage = e => render(JSON.parse(e.data));
+  es.onerror = () => { conn.textContent = "reconnecting…"; conn.classList.add("off"); };
+}
+// Fullscreen toggle (hidden where the Fullscreen API isn't available, e.g. iPhone Safari).
+const fsBtn = document.getElementById("fs");
+if (document.fullscreenEnabled) {
+  fsBtn.hidden = false;
+  fsBtn.addEventListener("click", () => document.fullscreenElement
+    ? document.exitFullscreen()
+    : document.documentElement.requestFullscreen({ navigationUI: "hide" }).catch(() => {}));
+  document.addEventListener("fullscreenchange", () => {
+    fsBtn.textContent = document.fullscreenElement ? "✕ Exit fullscreen" : "⛶ Fullscreen";
+  });
+}
+
+connect();
+</script>
+</body>
+</html>
