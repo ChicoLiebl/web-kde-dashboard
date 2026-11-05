@@ -81,6 +81,7 @@ the service to generate a new one; open the new URL on the tablet afterwards.
 | `go_to_desktop(number)` | "Go to desktop 3" |
 | `go_to_claude_session(project)` | "Open the air hub session" |
 | `go_to_waiting_claude_session` | "Take me to the one that needs me" |
+| `mark_claude_session_idle(project)` | "This session is finished", "mark all idle": stops the blinking |
 
 It needs the kddash service running. It reads the token from `~/.config/kddash/token` and talks to
 `http://127.0.0.1:8765`; override these with `KDDASH_TOKEN` and `KDDASH_URL`. It needs Python with

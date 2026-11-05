@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """MCP server (stdio) that lets a voice agent (StackChan / XiaoZhi) list the running
-Claude Code sessions and switch KDE virtual desktops, via the local kddash service.
+Claude Code sessions, mark them idle and switch KDE virtual desktops, via the local kddash service.
 
 kddash.py must be running; this server only talks to its HTTP API on localhost.
 """
@@ -68,6 +68,8 @@ def _sessions(state):
                 "status": "marked idle" if c["snoozed"] else SPOKEN_STATUS.get(c["status"], c["status"]),
                 "task": c["title"][:TITLE_MAX],
                 "_window": w["id"],
+                "_pid": c["pid"],
+                "_snoozed": c["snoozed"],
                 "_alert": 0 if c["snoozed"] else {"blocked": 2, "done": 1}.get(c["status"], 0),
             })
     return sorted(out, key=lambda s: (s["desktop"] or 0, s["project"]))
@@ -153,6 +155,37 @@ def go_to_claude_session(project: str) -> dict:
     target = matches[0]
     _request("/api/activate", {"window": target["_window"]}, method="POST")
     return {"success": True, **_public(target)}
+
+
+@mcp.tool()
+@_errors
+def mark_claude_session_idle(project: str) -> dict:
+    """Mark a Claude Code session as idle on the dashboard, so it stops blinking yellow. `project` is the session's
+    name as returned by list_claude_sessions (spoken forms are fine), or "all" for every session waiting for the user.
+    Use when the user says a session is finished, done or can be ignored, or asks to mark it idle or stop it blinking.
+    It clears by itself when that session's status changes again."""
+    logger.info(f"mark_claude_session_idle({project!r})")
+    sessions = _sessions(_state())
+    waiting = [s for s in sessions if s["_alert"]]
+    if _norm(project) in ("all", "everything", "todas", "tudo"):
+        targets = waiting
+    else:
+        want = _norm(project)
+        if not want:
+            return {"success": False, "error": "Please say which session."}
+        targets = [s for s in sessions if _norm(s["project"]) == want] \
+            or [s for s in sessions if want in _norm(s["project"]) or _norm(s["project"]) in want]
+        if not targets:
+            names = ", ".join(sorted({s["project"] for s in sessions})) or "none"
+            return {"success": False, "error": f"No Claude session matches {project!r}. Running: {names}."}
+        if len(targets) > 1:
+            return {"success": False, "error": "Several sessions match; say which one.",
+                    "candidates": [_public(s) for s in targets]}
+        if targets[0]["status"] == "working":
+            return {"success": False, "error": f"{targets[0]['project']} is still working, so it can't be marked idle."}
+    for s in targets:
+        _request("/api/snooze", {"pid": s["_pid"], "on": 1}, method="POST")
+    return {"success": True, "marked_idle": [s["project"] for s in targets]}
 
 
 @mcp.tool()
