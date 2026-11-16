@@ -111,6 +111,40 @@
     padding: 10px 16px; background: #2c3240; color: var(--text); cursor: pointer; }
   button.primary { background: var(--waiting); color: #111; }
   .sheet .none { color: var(--muted); }
+  button:disabled { opacity: .5; cursor: default; }
+
+  /* New-desktop launcher and session settings */
+  .sheet.wide { width: min(760px, 100%); }
+  .field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; font-weight: 600; color: var(--muted); }
+  select { font: inherit; font-size: 16px; padding: 10px 12px; border-radius: 10px; width: 100%;
+    background: #11141a; color: var(--text); border: 1px solid var(--line); }
+  .hint { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; }
+  .error { color: #ff6b6b; font-size: 14px; }
+  .error:empty { display: none; }
+  .check { display: flex; gap: 10px; align-items: center; font-size: 14px; }
+  .check input { width: 20px; height: 20px; }
+  .sortbar { display: flex; gap: 6px; }
+  .chip { padding: 5px 12px; font-size: 13px; border-radius: 99px; background: #232833; color: var(--muted); }
+  .chip.on { background: var(--current); color: var(--bg); }
+  .slist { display: flex; flex-direction: column; gap: 6px; max-height: min(46vh, 440px); overflow-y: auto;
+    overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding: 2px; margin: 0 -2px;
+    scrollbar-color: #3a404d transparent;
+    border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); padding-block: 8px; }
+  .sitem { text-align: left; font-weight: 400; padding: 10px 12px; background: rgba(0,0,0,.25);
+    border: 2px solid transparent; flex: none; }
+  .sitem.sel { border-color: var(--waiting); background: #2a2610; }
+  .sitem .top { display: flex; align-items: baseline; gap: 8px; }
+  .sitem b { font-family: ui-monospace, "JetBrains Mono", monospace; font-size: 15px; flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sitem .dbadge { font-size: 12px; color: var(--muted); flex: none; }
+  .sitem .sub { color: var(--muted); font-size: 13px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .srow { display: flex; align-items: center; gap: 12px; background: rgba(0,0,0,.25); border-radius: 10px; padding: 10px 12px; }
+  .srow .who { flex: 1; min-width: 0; }
+  .srow .who b { font-family: ui-monospace, "JetBrains Mono", monospace; font-size: 15px; }
+  .srow .who div { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .srow select { width: 170px; flex: none; }
+  .srow .ok { width: 1.2em; color: #3ecf8e; flex: none; }
+  .srow .running { font-size: 10px; font-weight: 800; text-transform: uppercase; color: var(--working); margin-left: 6px; }
 </style>
 </head>
 <body>
@@ -119,10 +153,12 @@
   <span class="stat"><span class="dot" style="background:var(--waiting)"></span><span id="n-idle">0</span> waiting</span>
   <span class="stat"><span class="dot" style="background:var(--working)"></span><span id="n-working">0</span> working</span>
   <span class="conn off" id="conn">connecting…</span>
+  <button class="fs" id="cfg">⚙ Sessions</button>
   <button class="fs" id="fs" hidden>⛶ Fullscreen</button>
 </header>
 <main id="grid"><div class="msg">Waiting for KWin…</div></main>
 <div class="backdrop" id="backdrop"><div class="sheet" id="sheet"></div></div>
+<div class="backdrop" id="modal-backdrop"><div class="sheet" id="modal"></div></div>
 <script>
 // Token: from ?t= on first open, then remembered so the home-screen shortcut keeps working.
 let token = new URLSearchParams(location.search).get("t");
@@ -173,6 +209,15 @@ function subtitle(c) {
   return c.status === "blocked" && c.waitingFor ? `⚠ ${c.waitingFor} · ${c.title}` : c.title;
 }
 
+// First empty desktop after the current one, wrapping around: {id, name, number} or undefined.
+function nextEmpty(s) {
+  const cur = s.desktops.findIndex(d => d.id === s.current);
+  for (let k = 1; k <= s.desktops.length; k++) {
+    const i = (cur + k) % s.desktops.length, d = s.desktops[i];
+    if (!s.windows.some(w => w.desktops.includes(d.id))) return { ...d, number: i + 1 };
+  }
+}
+
 function render(s) {
   last = s;
   document.getElementById("host").textContent = s.host || "Desktops";
@@ -211,14 +256,10 @@ function render(s) {
     </section>`;
   }).join("");
 
-  // "Next empty desktop": first empty one after the current desktop, wrapping around.
-  const isEmpty = d => !s.windows.some(w => w.desktops.includes(d.id));
-  const order = s.desktops.map((_, k) => s.desktops[(curIdx + 1 + k) % s.desktops.length]);
-  const empty = order.find(isEmpty);
-  const idx = empty ? s.desktops.indexOf(empty) : -1;
-  const next = empty
-    ? `<section class="next" data-desktop="${esc(empty.id)}"><span class="plus">+</span>Empty desktop<span class="sub">go to ${idx + 1} · ${esc(empty.name)}</span></section>`
-    : `<section class="next none"><span class="plus">∅</span>No empty desktop</section>`;
+  // "New desktop" tile: opens the launcher; its default desktop is the next empty one.
+  const empty = nextEmpty(s);
+  const next = `<section class="next"><span class="plus">+</span>New desktop
+    <span class="sub">${empty ? `next empty: ${empty.number} · ${esc(empty.name)}` : "no empty desktop"}</span></section>`;
 
   grid.innerHTML = cards + next;
   layout();
@@ -247,6 +288,7 @@ function renderSheet() {
     ${rows || `<div class="none">No Claude sessions on this desktop.</div>`}
     <div class="actions">
       ${alerting.length > 1 ? `<button class="primary" data-snooze-all>Mark all idle</button>` : ""}
+      <button data-launch>Open Claude session here</button>
       <button data-go>Go to desktop</button><button data-close>Close</button>
     </div>`;
 }
@@ -261,6 +303,11 @@ backdrop.addEventListener("click", e => {
   if (b.dataset.snooze) return snooze(b.dataset.snooze, b.dataset.on === "1");
   if (b.dataset.snoozeAll !== undefined) return sessionsOn(last, sheetDesk).filter(isAlert).forEach(c => snooze(c.pid, true));
   if (b.dataset.go !== undefined) { post({ desktop: sheetDesk }); closeSheet(); }
+  if (b.dataset.launch !== undefined) {
+    const n = last.desktops.findIndex(d => d.id === sheetDesk) + 1;
+    closeSheet();
+    openLauncher(n);
+  }
 });
 
 // Taps and long-presses are resolved from the element under the finger at pointerdown:
@@ -268,6 +315,7 @@ backdrop.addEventListener("click", e => {
 let press = null;
 grid.addEventListener("pointerdown", e => {
   if (e.button !== 0) return;
+  if (e.target.closest(".next")) { press = { x: e.clientX, y: e.clientY, newTile: true }; return; }
   const target = e.target.closest("[data-desktop]");
   if (!target) return;
   const win = e.target.closest("[data-window]");
@@ -290,6 +338,7 @@ grid.addEventListener("pointerup", () => {
   const p = press; press = null;
   clearTimeout(p.timer);
   if (p.long) return;
+  if (p.newTile) return openLauncher();
   post(p.window ? { window: p.window } : { desktop: p.desktop });
 });
 grid.addEventListener("contextmenu", e => {  // right-click on desktop; also blocks Android's long-press menu
@@ -297,6 +346,147 @@ grid.addEventListener("contextmenu", e => {  // right-click on desktop; also blo
   const desk = e.target.closest(".desk");
   if (desk && !sheetDesk) openSheet(desk.dataset.desktop);
 });
+
+// ---- modal: "New desktop" launcher and session desktop settings (not re-rendered by live updates)
+
+const modalBackdrop = document.getElementById("modal-backdrop"), modal = document.getElementById("modal");
+const openModal = (html, wide) => { modal.className = "sheet" + (wide ? " wide" : ""); modal.innerHTML = html; modalBackdrop.classList.add("open"); };
+const closeModal = () => modalBackdrop.classList.remove("open");
+modalBackdrop.addEventListener("click", e => {
+  if (e.target === modalBackdrop || e.target.closest("[data-close]")) closeModal();
+});
+document.addEventListener("keydown", e => { if (e.key === "Escape") { closeModal(); closeSheet(); } });
+
+async function call(path, params = {}, method = "GET") {
+  const r = await fetch(`api/${path}?t=${encodeURIComponent(token)}&${new URLSearchParams(params)}`, { method });
+  const body = r.status === 204 ? {} : await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || `${r.status} ${r.statusText}`);
+  return body;
+}
+
+function ago(ts) {
+  if (!ts) return "never opened";
+  const sec = Date.now() / 1000 - ts;
+  for (const [u, n] of [["d", 86400], ["h", 3600], ["m", 60]]) if (sec >= n) return `${Math.floor(sec / n)}${u} ago`;
+  return "just now";
+}
+
+// `fixedDesktop` (1-based): opened from a desktop's long-press popup, so the session opens there
+// and choosing a session doesn't move the desktop to the session's saved one.
+async function openLauncher(fixedDesktop) {
+  const heading = fixedDesktop ? `Claude session on desktop ${fixedDesktop}` : "New desktop";
+  openModal(`<h2>${heading}</h2><div class="hint">Loading sessions…</div>`);
+  let data;
+  try { data = await call("sessions"); }
+  catch (err) { return openModal(`<h2>${heading}</h2><div class="error">${esc(err.message)}</div>
+    <div class="actions"><button data-close>Close</button></div>`); }
+  const sessions = data.sessions.filter(x => !x.running);
+  const empty = fixedDesktop ? null : nextEmpty(last);
+  const fallback = fixedDesktop || (empty ? empty.number : (last.desktops.findIndex(d => d.id === last.current) + 1));
+  const deskLabel = d => `${d.number} · ${d.name}${d.empty ? " (empty)" : d.tab ? " (kitty: new tab)" : ""}`;
+
+  openModal(`<h2>${heading}</h2>
+    <div class="field">Claude session
+      <div class="sortbar"><button class="chip on" data-sort="used">Most used</button><button class="chip" data-sort="recent">Recent</button></div></div>
+    <div class="slist" id="l-list" role="listbox"></div>
+    <div class="hint" id="l-info"></div>
+    <label class="field">Desktop
+      <select id="l-desktop">${data.desktops.map(d => `<option value="${d.number}">${esc(deskLabel(d))}</option>`).join("")}</select></label>
+    <div class="hint" id="l-how"></div>
+    <label class="check" id="l-remember-row" hidden><input type="checkbox" id="l-remember"><span id="l-remember-text"></span></label>
+    <div class="error" id="l-error"></div>
+    <div class="actions">
+      ${empty ? `<button id="l-goto">Just go to desktop ${empty.number}</button>` : ""}
+      <button data-close>Cancel</button>
+      <button class="primary" id="l-launch" disabled>Launch</button>
+    </div>`);
+
+  const $ = id => document.getElementById(id);
+  const desk = $("l-desktop"), list = $("l-list");
+  desk.value = fallback;
+  let selected = null, sort = "used";
+  const current = () => sessions.find(x => x.key === selected);
+
+  // Server order is "most used" (prompts you sent, recent ones weighted more); "recent" = last prompt.
+  function renderList() {
+    const rows = sort === "recent" ? [...sessions].sort((a, b) => b.last_used - a.last_used) : sessions;
+    list.innerHTML = rows.map(x => `<button class="sitem${x.key === selected ? " sel" : ""}" data-key="${esc(x.key)}" role="option">
+        <div class="top"><b>${esc(x.name)}</b>${x.desktop ? `<span class="dbadge">desktop ${x.desktop}</span>` : ""}</div>
+        <div class="sub">${esc(x.short_cwd)} · ${x.prompts} prompt${x.prompts === 1 ? "" : "s"} · used ${ago(x.last_used)}</div>
+      </button>`).join("") || `<div class="none">No named sessions that aren't running.</div>`;
+  }
+  list.addEventListener("click", e => {
+    const item = e.target.closest(".sitem");
+    if (!item) return;
+    selected = item.dataset.key;
+    list.querySelectorAll(".sitem").forEach(el => el.classList.toggle("sel", el === item));
+    const x = current();
+    if (!fixedDesktop) desk.value = x.desktop && x.desktop <= data.desktops.length ? x.desktop : fallback;
+    $("l-remember").checked = !x.desktop;  // first launch: remember the choice by default
+    update();
+  });
+  modal.querySelector(".sortbar").addEventListener("click", e => {
+    const chip = e.target.closest(".chip");
+    if (!chip) return;
+    sort = chip.dataset.sort;
+    modal.querySelectorAll(".chip").forEach(c => c.classList.toggle("on", c === chip));
+    renderList();
+    list.scrollTop = 0;
+  });
+  renderList();
+
+  function update() {
+    const x = current(), n = +desk.value, d = data.desktops[n - 1];
+    $("l-info").textContent = x?.title && x.title !== x.name ? x.title : "";
+    $("l-how").textContent = d.tab ? "Opens as a new tab in the kitty window on that desktop."
+      : d.kitty ? "The kitty there has remote control off, so this opens a new kitty window (see README)."
+      : "Opens a new kitty window, tiled to the right.";
+    $("l-remember-row").hidden = !x || x.desktop === n;
+    $("l-remember-text").textContent = x?.desktop ? `Change this session's saved desktop from ${x.desktop} to ${n}` : `Save desktop ${n} for this session`;
+    $("l-launch").disabled = !x;
+  }
+  desk.addEventListener("change", update);
+  update();
+
+  $("l-goto")?.addEventListener("click", () => { post({ desktop: empty.id }); closeModal(); });
+  $("l-launch").addEventListener("click", async () => {
+    const btn = $("l-launch");
+    btn.disabled = true; btn.textContent = "Opening…"; $("l-error").textContent = "";
+    try {
+      await call("launch", { key: selected, desktop: desk.value, remember: $("l-remember").checked && !$("l-remember-row").hidden ? 1 : 0 }, "POST");
+      if (navigator.vibrate) navigator.vibrate(15);
+      closeModal();
+    } catch (err) {
+      $("l-error").textContent = err.message; btn.disabled = false; btn.textContent = "Launch";
+    }
+  });
+}
+
+async function openSettings() {
+  openModal(`<h2>Session desktops</h2><div class="hint">Loading…</div>`, true);
+  let data;
+  try { data = await call("sessions"); }
+  catch (err) { return openModal(`<h2>Session desktops</h2><div class="error">${esc(err.message)}</div>
+    <div class="actions"><button data-close>Close</button></div>`, true); }
+  const options = sel => `<option value="0">— not set</option>` + data.desktops.map(d =>
+    `<option value="${d.number}"${d.number === sel ? " selected" : ""}>${d.number} · ${esc(d.name)}</option>`).join("");
+  const rows = data.sessions.map(x => `
+    <div class="srow"><div class="who"><b>${esc(x.name)}</b>${x.running ? `<span class="running">running</span>` : ""}
+      <div>${esc(x.short_cwd)} · ${x.prompts} prompt${x.prompts === 1 ? "" : "s"} · used ${ago(x.last_used)}</div></div>
+      <select data-key="${esc(x.key)}">${options(x.desktop)}</select><span class="ok"></span></div>`).join("");
+  openModal(`<h2>Session desktops</h2>
+    <div class="hint">The desktop each named session opens on from <b>New desktop</b>. Stored in ~/.config/ccm/sessions.json, shared with the <code>ccm</code> command.</div>
+    ${rows || `<div class="none">No named sessions yet. Name one with <code>claude -n NAME</code> or <code>/rename</code>.</div>`}
+    <div class="error" id="s-error"></div>
+    <div class="actions"><button class="primary" data-close>Done</button></div>`, true);
+  modal.querySelectorAll("select[data-key]").forEach(s => s.addEventListener("change", async () => {
+    const ok = s.nextElementSibling;
+    ok.textContent = "…";
+    try { await call("sessions/desktop", { key: s.dataset.key, desktop: s.value }, "POST"); ok.textContent = "✓"; }
+    catch (err) { ok.textContent = "!"; document.getElementById("s-error").textContent = err.message; }
+  }));
+}
+document.getElementById("cfg").addEventListener("click", openSettings);
 
 function connect() {
   if (!token) { grid.innerHTML = `<div class="msg">Open the URL printed by <code>kddash.py</code> (it includes ?t=…)</div>`; return; }

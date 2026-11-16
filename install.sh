@@ -78,3 +78,13 @@ if systemctl is-active --quiet firewalld 2>/dev/null; then
     echo "firewalld is active. If the tablet can't connect, open the port in your network's zone, e.g.:"
     echo "  sudo firewall-cmd --permanent --zone=home --add-port=$PORT/tcp && sudo firewall-cmd --reload"
 fi
+
+KITTY_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/kitty/kitty.conf"
+if command -v kitty >/dev/null \
+    && ! grep -qE '^\s*allow_remote_control\s+(yes|socket|socket-only)\b' "$KITTY_CONF" 2>/dev/null; then
+    echo
+    echo "To open sessions as tabs in an existing kitty window (instead of a new window), add to $KITTY_CONF:"
+    echo '  allow_remote_control socket-only'
+    echo '  listen_on unix:${XDG_RUNTIME_DIR}/kitty-{kitty_pid}.sock'
+    echo "then restart your kitty windows. See README.md, \"Launching sessions\"."
+fi

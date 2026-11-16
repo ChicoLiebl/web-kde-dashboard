@@ -8,9 +8,11 @@ and Claude Code's own per-process state (~/.claude/sessions/<pid>.json), and
 stream the result to browsers via Server-Sent Events.
 """
 import asyncio
+import itertools
 import json
 import os
 import secrets
+import signal
 import shutil
 import socket
 import subprocess
@@ -19,12 +21,19 @@ import tempfile
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+from dbus_next import NameFlag, RequestNameReply
 from dbus_next.aio import MessageBus
 from dbus_next.service import ServiceInterface, method
 
+import launcher
+
 HERE = Path(__file__).resolve().parent
 KWIN_SCRIPT = HERE / "kwin" / "kddash.js"
-KWIN_PLUGIN = "kddash"
+# A fresh KWin plugin name per run: KWin can get stuck on a name after a quick unload/reload and
+# then never runs a script loaded under it. The name in use is recorded so the next run can
+# unload it if this one dies without cleaning up.
+KWIN_PLUGIN = f"kddash_{os.getpid()}"
+KWIN_PLUGIN_FILE = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "kddash-kwin-plugin"
 STATIC = HERE / "static"
 PORT = int(os.environ.get("KDDASH_PORT", "8765"))
 BROADCAST_DELAY = 0.3  # seconds
@@ -110,7 +119,7 @@ def session_info(pid, caption, only_session):
     if pid in snoozed and snoozed[pid] != status:
         del snoozed[pid]
     return {
-        "pid": pid, "cwd": cwd, "project": Path(cwd).name or cwd,
+        "pid": pid, "sessionId": meta.get("sessionId"), "cwd": cwd, "project": Path(cwd).name or cwd,
         "title": last_title.get(pid) or meta.get("name") or "",
         "waitingFor": meta.get("waitingFor"),
         "status": status, "snoozed": pid in snoozed,
@@ -192,26 +201,62 @@ def snooze(pid, on):
 
 
 async def kwin_call(path, iface, member, signature="", body=()):
-    from dbus_next import Message
+    from dbus_next import Message, MessageType
     reply = await bus.call(Message(destination="org.kde.KWin", path=path, interface=iface,
                                    member=member, signature=signature, body=list(body)))
+    if reply.message_type == MessageType.ERROR:
+        raise RuntimeError(f"KWin {member}: {reply.error_name} {reply.body}")
     return reply.body
 
 
 async def load_kwin_script(path, plugin):
     scripting = ("/Scripting", "org.kde.kwin.Scripting")
     await kwin_call(*scripting, "unloadScript", "s", [plugin])
-    (sid,) = await kwin_call(*scripting, "loadScript", "ss", [str(path), plugin])
-    await kwin_call(f"/Scripting/Script{sid}", "org.kde.kwin.Script", "run")
+    for _ in range(10):  # an unload finishes asynchronously; until then KWin refuses the name (-1)
+        (sid,) = await kwin_call(*scripting, "loadScript", "ss", [str(path), plugin])
+        if sid >= 0:
+            break
+        await asyncio.sleep(0.2)
+    else:
+        raise RuntimeError(f"KWin refused to load {path}")
+    # Scripting.start() runs every loaded script that isn't running yet. Not /Scripting/Script<id>.run:
+    # KWin reuses ids, and after an unload a stale object can keep that path, so run() goes nowhere.
+    await kwin_call(*scripting, "start")
 
 
-async def run_oneshot(js):
+async def ensure_kwin_script():
+    """Load the snapshot script and make sure snapshots arrive; reload it if none show up."""
+    try:
+        stale = KWIN_PLUGIN_FILE.read_text().strip()
+    except OSError:
+        stale = ""
+    for name in {stale, "kddash"} - {"", KWIN_PLUGIN}:  # left by a previous run ("kddash": older versions)
+        await kwin_call("/Scripting", "org.kde.kwin.Scripting", "unloadScript", "s", [name])
+    KWIN_PLUGIN_FILE.write_text(KWIN_PLUGIN)
+    for attempt in range(1, 6):
+        await load_kwin_script(KWIN_SCRIPT, KWIN_PLUGIN)
+        for _ in range(30):
+            if raw_state is not None:
+                if attempt > 1:
+                    print(f"KWin snapshots arriving (attempt {attempt})", file=sys.stderr)
+                return
+            await asyncio.sleep(0.1)
+        print(f"no snapshot from KWin after loading its script (attempt {attempt}); reloading", file=sys.stderr)
+    print("KWin never sent a snapshot; the dashboard will stay empty", file=sys.stderr)
+
+
+_script_ids = itertools.count()
+
+
+async def run_oneshot(js, hold=0.2):
+    """Run a throwaway KWin script, keeping it loaded for `hold` seconds (for scripts that wait on signals)."""
+    plugin = f"kddash_oneshot_{next(_script_ids)}"
     with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
         f.write(js)
     try:
-        await load_kwin_script(f.name, "kddash_oneshot")
-        await asyncio.sleep(0.2)
-        await kwin_call("/Scripting", "org.kde.kwin.Scripting", "unloadScript", "s", ["kddash_oneshot"])
+        await load_kwin_script(f.name, plugin)
+        await asyncio.sleep(hold)
+        await kwin_call("/Scripting", "org.kde.kwin.Scripting", "unloadScript", "s", [plugin])
     finally:
         os.unlink(f.name)
 
@@ -230,6 +275,118 @@ async def activate(window_id=None, desktop_id=None):
         for (const d of workspace.desktops)
             if (d.id === {json.dumps(desktop_id)}) workspace.currentDesktop = d;"""
     await run_oneshot(js)
+
+
+# ---------------------------------------------------------------- launching saved/named sessions
+
+# Waits for the new kitty window (by pid), puts it on the target desktop and into the rightmost
+# tile of that desktop's KWin tiling layout (Meta+T), or quick-tiles it right if there is none.
+PLACE_JS = """
+const PID = %(pid)d, DESK = workspace.desktops[%(index)d];
+let done = false;
+function rightTile(w) {
+    let root = null;
+    try { root = workspace.rootTile(w.output, DESK); } catch (e) {}
+    if (!root) { try { root = workspace.tilingForScreen(w.output).rootTile; } catch (e) {} }
+    if (!root || !root.tiles || root.tiles.length < 2) return null;
+    let best = null;
+    for (const t of root.tiles)
+        if (!best || t.absoluteGeometry.x > best.absoluteGeometry.x) best = t;
+    return best;
+}
+function place(w) {
+    if (done || !w || w.pid !== PID || !w.normalWindow) return;
+    done = true;
+    if (DESK) { w.desktops = [DESK]; workspace.currentDesktop = DESK; }
+    const t = rightTile(w);
+    if (t) w.tile = t;
+    else { workspace.activeWindow = w; workspace.slotWindowQuickTileRight(); }
+    workspace.activeWindow = w;
+}
+for (const w of workspace.windowList()) place(w);
+workspace.windowAdded.connect(place);
+"""
+
+
+async def kitten(sock, *args):
+    proc = await asyncio.create_subprocess_exec(
+        "kitten", "@", "--to", f"unix:{sock}", *args,
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = await asyncio.wait_for(proc.communicate(), timeout=5)
+    if proc.returncode:
+        raise RuntimeError(f"kitten @ {args[0]}: {err.decode().strip() or proc.returncode}")
+    return out.decode().strip()
+
+
+async def open_tab(sock, session):
+    wid = None
+    for args in launcher.tab_commands(session):
+        out = await kitten(sock, *[a.replace("{wid}", wid or "") for a in args])
+        wid = wid or out
+
+
+def spawn_window(session):
+    """Start a kitty window for the session in its own systemd scope, so it outlives this service."""
+    cmd = launcher.window_command(session)
+    if shutil.which("systemd-run"):
+        cmd = ["systemd-run", "--user", "--scope", "--quiet", "--collect", "--slice=app.slice", *cmd]
+    return subprocess.Popen(cmd, cwd=session["cwd"], start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+async def launch_session(key, number, remember):
+    """Open a saved/named session on desktop `number` (1-based). Returns {"how": "focused"|"tab"|"window"}."""
+    session = launcher.find(key)
+    if session is None:
+        raise LookupError("unknown session")
+    if not os.path.isdir(session["cwd"]):
+        raise LookupError(f"folder does not exist: {session['cwd']}")
+    desktops = state["desktops"]
+    if not 1 <= number <= len(desktops):
+        raise LookupError(f"there is no desktop {number}")
+    if remember:
+        launcher.set_desktop(key, number)
+
+    # Already running (e.g. started elsewhere since the list was loaded): just focus it.
+    for w in state["windows"]:
+        if any(c.get("sessionId") == session["session_id"] for c in w.get("claude", [])):
+            await activate(window_id=w["id"])
+            return {"how": "focused"}
+
+    target = desktops[number - 1]
+    kitties = [w for w in state["windows"] if target["id"] in w["desktops"]
+               and w["cls"] in launcher.KITTY_CLASSES]
+    kitties.sort(key=lambda w: not w["active"])  # prefer the focused one
+    for w in kitties:
+        sock = launcher.kitty_socket(w["pid"])
+        if not sock:
+            continue
+        try:
+            await open_tab(sock, session)
+        except (RuntimeError, asyncio.TimeoutError, OSError) as e:
+            print(f"tab in kitty {w['pid']} failed, trying next: {e}", file=sys.stderr)
+            continue
+        await activate(window_id=w["id"])
+        return {"how": "tab"}
+
+    proc = spawn_window(session)
+    # With systemd-run --scope, the scope's process *is* kitty (systemd-run execs it), so the pid matches.
+    asyncio.create_task(run_oneshot(PLACE_JS % {"pid": proc.pid, "index": number - 1}, hold=8))
+    await activate(desktop_id=target["id"])
+    return {"how": "window"}
+
+
+def sessions_payload():
+    windows = state["windows"]
+    desktops = []
+    for i, d in enumerate(state["desktops"]):
+        wins = [w for w in windows if d["id"] in w["desktops"]]
+        desktops.append({
+            "number": i + 1, "id": d["id"], "name": d["name"], "empty": not wins,
+            "tab": any(w["cls"] in launcher.KITTY_CLASSES and launcher.kitty_socket(w["pid"]) for w in wins),
+            "kitty": any(w["cls"] in launcher.KITTY_CLASSES for w in wins),
+        })
+    return {"sessions": launcher.catalog(), "desktops": desktops}
 
 
 # ---------------------------------------------------------------- HTTP
@@ -302,6 +459,23 @@ async def handle(reader, writer):
             snooze(int(q.get("pid", 0)), q.get("on") == "1")
             return await respond(writer, "204 No Content")
 
+        if path == "/api/sessions":
+            return await respond(writer, "200 OK", json.dumps(sessions_payload()), "application/json")
+
+        if path == "/api/sessions/desktop" and method_ == "POST":
+            try:
+                launcher.set_desktop(q.get("key", ""), int(q.get("desktop") or 0) or None)
+            except KeyError:
+                return await respond(writer, "404 Not Found", "unknown session")
+            return await respond(writer, "204 No Content")
+
+        if path == "/api/launch" and method_ == "POST":
+            try:
+                result = await launch_session(q.get("key", ""), int(q.get("desktop") or 0), q.get("remember") == "1")
+            except (LookupError, OSError, RuntimeError) as e:
+                return await respond(writer, "409 Conflict", json.dumps({"error": str(e)}), "application/json")
+            return await respond(writer, "200 OK", json.dumps(result), "application/json")
+
         await respond(writer, "404 Not Found", "not found")
     except (ConnectionError, asyncio.IncompleteReadError, ValueError):
         pass
@@ -322,19 +496,28 @@ async def main():
     global bus
     bus = await MessageBus().connect()
     bus.export("/", KddashIface())
-    await bus.request_name("org.kddash")
-    await load_kwin_script(KWIN_SCRIPT, KWIN_PLUGIN)
+    # KWin pushes snapshots to whoever owns the name; refuse to run as a silent second copy.
+    if await bus.request_name("org.kddash", NameFlag.DO_NOT_QUEUE) != RequestNameReply.PRIMARY_OWNER:
+        sys.exit("kddash: another kddash already owns org.kddash on the session bus "
+                 "(stop it first: systemctl --user stop kddash)")
 
     server = await asyncio.start_server(handle, "0.0.0.0", PORT)
-    poller = asyncio.create_task(poll())  # noqa: F841 (keep a reference)
+    tasks = [asyncio.create_task(ensure_kwin_script()), asyncio.create_task(poll())]  # noqa: F841 (keep references)
     url = f"http://{lan_ip()}:{PORT}/?t={TOKEN}"
     print(f"kddash serving on {url}", flush=True)
     if shutil.which("qrencode") and sys.stdout.isatty():
         subprocess.run(["qrencode", "-t", "ansiutf8", url])
+    # Stop cleanly on SIGTERM (systemctl stop/restart) so the KWin script gets unloaded.
+    stop = asyncio.Event()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        asyncio.get_running_loop().add_signal_handler(sig, stop.set)
     try:
-        async with server:
-            await server.serve_forever()
+        await stop.wait()
     finally:
+        # Don't wait for clients to disconnect: browsers hold their /events stream open forever.
+        server.close()
+        if hasattr(server, "close_clients"):  # Python 3.13+
+            server.close_clients()
         try:
             await kwin_call("/Scripting", "org.kde.kwin.Scripting", "unloadScript", "s", [KWIN_PLUGIN])
         except Exception:

@@ -3,6 +3,14 @@
 const SVC = "org.kddash", PATH = "/", IFACE = "org.kddash";
 
 function snapshot() {
+    try {
+        push();
+    } catch (e) {
+        print("kddash: snapshot failed: " + e);
+    }
+}
+
+function push() {
     const desktops = workspace.desktops.map((d, i) => ({ id: d.id, name: d.name, index: i }));
     const windows = workspace.windowList()
         .filter(w => w.normalWindow && !w.skipTaskbar)
@@ -32,4 +40,5 @@ workspace.windowRemoved.connect(snapshot);
 workspace.windowActivated.connect(snapshot);
 workspace.currentDesktopChanged.connect(snapshot);
 workspace.desktopsChanged.connect(snapshot);
+print("kddash: KWin script started");
 snapshot();

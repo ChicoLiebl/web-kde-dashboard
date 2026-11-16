@@ -10,9 +10,15 @@ for a tablet (or any browser) on your local network. Tap a card to switch to tha
   - **needs you** (yellow, blinks): blocked on a permission prompt or a question.
   - **idle** (grey): you marked the session idle.
 - Tap a card to switch to its desktop, or tap a session or window to focus it.
-- Hold a card (or right-click it) to mark its sessions idle so they stop blinking. The mark clears itself
-  the next time that session's status changes.
-- The last tile is a **+ Empty desktop** button that switches to the next empty desktop.
+- Hold a card (or right-click it) for its popup:
+  - **Mark idle** stops a session blinking. The mark clears itself the next time that session's status
+    changes.
+  - **Open Claude session here** opens the launcher with that desktop already chosen.
+  - **Go to desktop** switches to it.
+- The last tile, **+ New desktop**, opens a launcher: pick a named Claude Code session that isn't
+  running and a desktop, and it opens there in kitty (see [Launching sessions](#launching-sessions)).
+  **Just go to desktop N** switches to the next empty desktop instead.
+- **⚙ Sessions** in the top bar sets the desktop each named session opens on.
 - **⛶ Fullscreen** in the top bar hides the browser and Android bars.
 - Optional: an MCP server lets a voice assistant (StackChan / XiaoZhi) list the sessions and switch
   desktops for you (see [Voice control](#voice-control-stackchan-mcp)).
@@ -27,6 +33,8 @@ No app to install on the tablet: it's a web page served by the PC.
   - Debian/Ubuntu: `sudo apt install python3-dbus-next`
   - Any: `pip install --user dbus-next`
 - systemd, for running it as a service.
+- kitty, for launching sessions. To open sessions as tabs in an existing kitty window, kitty needs remote
+  control turned on (see [Launching sessions](#launching-sessions)).
 - Optional: `qrencode` to print a QR code of the dashboard URL.
 
 ## Install
@@ -70,6 +78,54 @@ Check which zone your network interface is in with `firewall-cmd --get-active-zo
 
 The token is created on first run and stored in `~/.config/kddash/token`. Delete that file and restart
 the service to generate a new one; open the new URL on the tablet afterwards.
+
+## Launching sessions
+
+Tap **+ New desktop** to open a Claude Code session that isn't running:
+
+- **Session:** every named session on this computer that isn't running. A session is named when it was
+  started with `claude -n NAME` or renamed with `/rename`. Sessions saved with
+  [`ccm`](../claude-manager) are listed too. The list scrolls and has two orders:
+  - **Most used** (default): counts the prompts you typed into each session (from
+    `~/.claude/history.jsonl`), each prompt's weight halving every 14 days. Sessions you use a lot lately
+    come first; a session you used heavily months ago drops down.
+  - **Recent**: by your last prompt.
+
+  Each row shows the folder, the prompt count and when you last used it.
+- **Desktop:** defaults to the session's saved desktop, or the next empty desktop if it has none. Tick
+  **Save desktop N for this session** to remember a different choice.
+- **Launch:**
+  - If the desktop has a kitty window with remote control on, the session opens as a **new tab** in it.
+  - Otherwise it opens a **new kitty window** on that desktop, placed in the rightmost tile of the
+    desktop's tiling layout (Meta+T), or the right half if there is none.
+
+  Either way you get Claude on top and a shell in the same folder below (30% of the height), and Claude
+  resumes with `claude --resume <id> -n <name>`. If the session started running meanwhile, its window is
+  focused instead.
+
+**⚙ Sessions** lists all named sessions with a desktop picker for each, saved as soon as you change it.
+
+Saved desktops live in `~/.config/ccm/sessions.json`, the same list the `ccm` command from
+`../claude-manager` uses. `ccm set-desktop NAME N` and this page change the same setting:
+
+```json
+{ "air-hub": { "cwd": "/home/me/air-hub", "session_id": "…", "desktop": 3, "shell_pct": 30 } }
+```
+
+### Opening as a tab: kitty remote control
+
+The dashboard opens a tab through kitty's remote control socket, which is off by default. Add this to
+`~/.config/kitty/kitty.conf`:
+
+```conf
+allow_remote_control socket-only
+listen_on unix:${XDG_RUNTIME_DIR}/kitty-{kitty_pid}.sock
+```
+
+Each kitty process then listens on its own socket in `$XDG_RUNTIME_DIR`, which only you can access.
+Kitty windows that were already open before the change don't have one, so the dashboard opens a new
+window on their desktops until you restart them. Windows the dashboard opens always have remote control
+on, so later sessions for that desktop open as tabs in them.
 
 ## Voice control (StackChan MCP)
 
@@ -133,6 +189,9 @@ KWin ──(kwin/kddash.js pushes window/desktop snapshots over D-Bus)──▶ 
 - It also re-checks every second, because status changes in an unfocused split don't cause any KWin
   event.
 - Switching desktops or focusing a window runs a short one-off KWin script.
+- `launcher.py` lists named sessions (session names and titles from `~/.claude/projects/*/*.jsonl`, plus
+  `ccm`'s saved list) and builds the kitty commands. New kitty windows are started with
+  `systemd-run --user --scope`, so they keep running when the service restarts.
 - `static/index.html` is the whole front end: no build step, no dependencies.
 
 ### HTTP API
@@ -145,6 +204,9 @@ Every endpoint except the static files needs `?t=<token>`.
 | `GET /api/state` | Current state as JSON |
 | `POST /api/activate?desktop=<id>` or `?window=<id>` | Switch desktop, or focus a window |
 | `POST /api/snooze?pid=<claude pid>&on=1\|0` | Mark a session idle, or unmark it |
+| `GET /api/sessions` | Named sessions (saved desktop, running or not) and desktops (empty, has a kitty that accepts tabs) |
+| `POST /api/sessions/desktop?key=<key>&desktop=<n>` | Save a session's desktop (`0` clears it) |
+| `POST /api/launch?key=<key>&desktop=<n>&remember=1\|0` | Open a session on a desktop, as a tab or a new kitty window |
 
 ## Limitations
 
@@ -161,7 +223,8 @@ Every endpoint except the static files needs `?t=<token>`.
 
 | Path | What it is |
 |---|---|
-| `kddash.py` | Service: D-Bus listener, session detection, HTTP/SSE server |
+| `kddash.py` | Service: D-Bus listener, session detection, launching, HTTP/SSE server |
+| `launcher.py` | Named sessions, saved desktops (shared with `ccm`), kitty launch commands |
 | `kwin/kddash.js` | KWin script that pushes window/desktop snapshots |
 | `static/` | The dashboard page, PWA manifest and icon |
 | `kddash_mcp.py` | Optional MCP server for voice assistants |
