@@ -133,6 +133,8 @@
   .sitem { text-align: left; font-weight: 400; padding: 10px 12px; background: rgba(0,0,0,.25);
     border: 2px solid transparent; flex: none; }
   .sitem.sel { border-color: var(--waiting); background: #2a2610; }
+  .sitem:disabled { opacity: .55; }
+  .gone { color: #ff6b6b; }
   .sitem .top { display: flex; align-items: baseline; gap: 8px; }
   .sitem b { font-family: ui-monospace, "JetBrains Mono", monospace; font-size: 15px; flex: 1; min-width: 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -410,9 +412,9 @@ async function openLauncher(fixedDesktop) {
   // Server order is "most used" (prompts you sent, recent ones weighted more); "recent" = last prompt.
   function renderList() {
     const rows = sort === "recent" ? [...sessions].sort((a, b) => b.last_used - a.last_used) : sessions;
-    list.innerHTML = rows.map(x => `<button class="sitem${x.key === selected ? " sel" : ""}" data-key="${esc(x.key)}" role="option">
+    list.innerHTML = rows.map(x => `<button class="sitem${x.key === selected ? " sel" : ""}" data-key="${esc(x.key)}" role="option"${x.missing ? " disabled" : ""}>
         <div class="top"><b>${esc(x.name)}</b>${x.desktop ? `<span class="dbadge">desktop ${x.desktop}</span>` : ""}</div>
-        <div class="sub">${esc(x.short_cwd)} · ${x.prompts} prompt${x.prompts === 1 ? "" : "s"} · used ${ago(x.last_used)}</div>
+        <div class="sub">${x.missing ? `<span class="gone">folder not found:</span> ` : ""}${esc(x.short_cwd)} · ${x.prompts} prompt${x.prompts === 1 ? "" : "s"} · used ${ago(x.last_used)}</div>
       </button>`).join("") || `<div class="none">No named sessions that aren't running.</div>`;
   }
   list.addEventListener("click", e => {
@@ -472,7 +474,7 @@ async function openSettings() {
     `<option value="${d.number}"${d.number === sel ? " selected" : ""}>${d.number} · ${esc(d.name)}</option>`).join("");
   const rows = data.sessions.map(x => `
     <div class="srow"><div class="who"><b>${esc(x.name)}</b>${x.running ? `<span class="running">running</span>` : ""}
-      <div>${esc(x.short_cwd)} · ${x.prompts} prompt${x.prompts === 1 ? "" : "s"} · used ${ago(x.last_used)}</div></div>
+      <div>${x.missing ? `<span class="gone">folder not found:</span> ` : ""}${esc(x.short_cwd)} · ${x.prompts} prompt${x.prompts === 1 ? "" : "s"} · used ${ago(x.last_used)}</div></div>
       <select data-key="${esc(x.key)}">${options(x.desktop)}</select><span class="ok"></span></div>`).join("");
   openModal(`<h2>Session desktops</h2>
     <div class="hint">The desktop each named session opens on from <b>New desktop</b>. Stored in ~/.config/ccm/sessions.json, shared with the <code>ccm</code> command.</div>

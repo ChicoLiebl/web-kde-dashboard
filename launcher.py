@@ -59,31 +59,54 @@ _TITLE_RE = re.compile(rb'"type":"(custom-title|ai-title|agent-name)","(?:custom
 _scan_cache: dict[Path, tuple[float, dict]] = {}
 
 
+_CWD_RE = re.compile(rb'"cwd":("(?:[^"\\]|\\.)*")')
+
+
 def _scan(path, mtime):
-    """cwd (from the head) and latest names/titles (from the tail) of a session .jsonl, cached by mtime."""
+    """Folders and latest names/titles of a session .jsonl, cached by mtime: the folder it started in
+    (head) and the folders recorded most recently (tail)."""
     hit = _scan_cache.get(path)
     if hit and hit[0] == mtime:
         return hit[1]
-    cwd, titles = None, {}
+    first, recent, titles = None, [], {}
     try:
         with open(path, "rb") as fh:
             for i, line in enumerate(fh):
                 if i > 200:
                     break
-                m = re.search(rb'"cwd":("(?:[^"\\]|\\.)*")', line)
+                m = _CWD_RE.search(line)
                 if m:
-                    cwd = json.loads(m.group(1))
+                    first = json.loads(m.group(1))
                     break
             fh.seek(max(0, fh.seek(0, 2) - 256 * 1024))
-            for kind, value in _TITLE_RE.findall(fh.read()):
-                titles[kind.decode()] = json.loads(value)
+            tail = fh.read()
+        for value in _CWD_RE.findall(tail):
+            c = json.loads(value)
+            if c in recent:
+                recent.remove(c)
+            recent.append(c)  # distinct, oldest -> newest
+        for kind, value in _TITLE_RE.findall(tail):
+            titles[kind.decode()] = json.loads(value)
     except (OSError, ValueError):
         pass
-    info = {"cwd": cwd,
+    info = {"cwd_first": first, "cwd_recent": recent,
             "name": titles.get("agent-name") or titles.get("custom-title"),
             "title": titles.get("ai-title") or titles.get("custom-title") or ""}
     _scan_cache[path] = (mtime, info)
     return info
+
+
+def _resolve_cwd(info):
+    """The session's folder: where it started if that still exists; otherwise the most recently recorded
+    folder that exists (Claude appends to the same file when a moved project is resumed from its new
+    folder). Not cached: folders move."""
+    first, recent = info["cwd_first"], info["cwd_recent"]
+    if first and os.path.isdir(first):
+        return first
+    for c in reversed(recent):
+        if os.path.isdir(c):
+            return c
+    return first or (recent[-1] if recent else None)
 
 
 def session_file(sid):
@@ -100,8 +123,9 @@ def named_sessions():
         except OSError:
             continue
         info = _scan(f, mtime)
-        if info["name"] and info["cwd"]:
-            out[f.stem] = {**info, "mtime": mtime}
+        cwd = _resolve_cwd(info)
+        if info["name"] and cwd:
+            out[f.stem] = {"name": info["name"], "title": info["title"], "cwd": cwd, "mtime": mtime}
     return out
 
 
@@ -180,7 +204,9 @@ def catalog():
         sid = e.get("session_id")
         info = named.get(sid, {})
         out.append({
-            "key": sid or f"ccm:{name}", "name": name, "session_id": sid, "cwd": e["cwd"],
+            # A saved folder that's gone (moved by hand) loses to the one the session file now records.
+            "key": sid or f"ccm:{name}", "name": name, "session_id": sid,
+            "cwd": e["cwd"] if os.path.isdir(e["cwd"]) or not info.get("cwd") else info["cwd"],
             "desktop": e.get("desktop"), "shell_pct": e.get("shell_pct", DEFAULT_SHELL_PCT),
             "saved": True, "title": info.get("title", ""), "mtime": info.get("mtime", 0),
         })
@@ -196,6 +222,7 @@ def catalog():
     for s in out:
         s["running"] = bool(s["session_id"]) and s["session_id"] in running
         s["short_cwd"] = s["cwd"].replace(str(HOME), "~", 1)
+        s["missing"] = not os.path.isdir(s["cwd"])
         s.update(usage(s["session_id"]))
         s["last_used"] = s["last_used"] or s["mtime"]  # never prompted (e.g. renamed only): file time
     out.sort(key=lambda s: (-s["score"], -s["last_used"]))
