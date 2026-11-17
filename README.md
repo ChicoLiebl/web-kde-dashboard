@@ -20,6 +20,8 @@ for a tablet (or any browser) on your local network. Tap a card to switch to tha
   **Just go to desktop N** switches to the next empty desktop instead.
 - **⚙ Sessions** in the top bar sets the desktop each named session opens on.
 - **⛶ Fullscreen** in the top bar hides the browser and Android bars.
+- **☾ Sleep** in the top bar turns the tablet's screen off, for tablets kept always on (see
+  [Turning the tablet screen off](#turning-the-tablet-screen-off)).
 - Optional: an MCP server lets a voice assistant (StackChan / XiaoZhi) list the sessions and switch
   desktops for you (see [Voice control](#voice-control-stackchan-mcp)).
 
@@ -79,6 +81,32 @@ Check which zone your network interface is in with `firewall-cmd --get-active-zo
 The token is created on first run and stored in `~/.config/kddash/token`. Delete that file and restart
 the service to generate a new one; open the new URL on the tablet afterwards.
 
+### Turning the tablet screen off
+
+A web page can't turn the screen off by itself, so the PC does it. **☾ Sleep** asks kddash to send the
+sleep key to the tablet over network ADB (`adb connect <tablet>:5555`, then
+`input keyevent KEYCODE_SLEEP`). The button only shows on a device whose ADB port answers, and it acts on
+the device that tapped it, so there is nothing to configure.
+
+- The PC needs `adb` (Arch: `sudo pacman -S android-tools`).
+- The tablet needs ADB over the network. Wall-mounted Android panels usually have it on. On a normal
+  tablet, turn on wireless debugging (Developer options), or connect it by USB once and run
+  `adb tcpip 5555`.
+- The first time, the tablet may ask to **Allow USB debugging** from this PC. Tick "Always allow".
+
+To turn the screen back on, touch it. That works on many panels, but some ignore touch while the screen
+is off. Otherwise press the tablet's power button, or wake it from the PC. kddash remembers the last
+tablet that opened the dashboard:
+
+```bash
+curl -X POST "http://127.0.0.1:8765/api/tablet/wake?t=$(cat ~/.config/kddash/token)"
+```
+
+The StackChan tool `set_tablet_screen` does the same by voice ("turn off the tablet").
+
+**Security:** anyone on your network can use an open ADB port to fully control the tablet, with or
+without kddash. That's how these panels ship; keep them on a network you trust.
+
 ## Launching sessions
 
 Tap **+ New desktop** to open a Claude Code session that isn't running:
@@ -129,15 +157,21 @@ on, so later sessions for that desktop open as tabs in them.
 
 ## Voice control (StackChan MCP)
 
-`kddash_mcp.py` is an MCP server (stdio) with four tools:
+`kddash_mcp.py` is an MCP server (stdio) with these tools:
 
 | Tool | Example request |
 |---|---|
 | `list_claude_sessions` | "What are my Claude sessions doing?" |
 | `go_to_desktop(number)` | "Go to desktop 3" |
-| `go_to_claude_session(project)` | "Open the air hub session" |
+| `go_to_claude_session(project)` | "Show me the air hub session" |
 | `go_to_waiting_claude_session` | "Take me to the one that needs me" |
 | `mark_claude_session_idle(project)` | "This session is finished", "mark all idle": stops the blinking |
+| `list_launchable_claude_sessions` | "Which sessions can I open?": named sessions that aren't running, most used first |
+| `launch_claude_session(name, desktop)` | "Open cert manager", "start the ccm session on desktop 5" |
+| `set_tablet_screen(on)` | "Turn off the tablet", "wake the dashboard screen" |
+
+`launch_claude_session` works like the dashboard's launcher. It opens the session on the desktop you
+name, or on its saved desktop, or on the next empty desktop. It doesn't change the saved desktop.
 
 It needs the kddash service running. It reads the token from `~/.config/kddash/token` and talks to
 `http://127.0.0.1:8765`; override these with `KDDASH_TOKEN` and `KDDASH_URL`. It needs Python with
@@ -207,6 +241,8 @@ Every endpoint except the static files needs `?t=<token>`.
 | `GET /api/sessions` | Named sessions (saved desktop, running or not) and desktops (empty, has a kitty that accepts tabs) |
 | `POST /api/sessions/desktop?key=<key>&desktop=<n>` | Save a session's desktop (`0` clears it) |
 | `POST /api/launch?key=<key>&desktop=<n>&remember=1\|0` | Open a session on a desktop, as a tab or a new kitty window |
+| `GET /api/tablet` | `{"sleep": true}` if the requesting device's ADB port answers (and remembers it) |
+| `POST /api/tablet/sleep`, `POST /api/tablet/wake` | Screen off / on for the requesting device; from the PC itself, the remembered tablet |
 
 ## Limitations
 

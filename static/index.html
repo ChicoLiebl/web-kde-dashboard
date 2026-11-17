@@ -157,6 +157,7 @@
   <span class="conn off" id="conn">connecting…</span>
   <button class="fs" id="cfg">⚙ Sessions</button>
   <button class="fs" id="fs" hidden>⛶ Fullscreen</button>
+  <button class="fs" id="sleep" hidden title="Turn this tablet's screen off">☾ Sleep</button>
 </header>
 <main id="grid"><div class="msg">Waiting for KWin…</div></main>
 <div class="backdrop" id="backdrop"><div class="sheet" id="sheet"></div></div>
@@ -508,6 +509,21 @@ if (document.fullscreenEnabled) {
     fsBtn.textContent = document.fullscreenElement ? "✕ Exit fullscreen" : "⛶ Fullscreen";
   });
 }
+
+// Sleep: the PC turns this device's screen off over ADB (shown only where that works; see README).
+const sleepBtn = document.getElementById("sleep");
+call("tablet").then(r => { sleepBtn.hidden = !r.sleep; }).catch(() => {});
+sleepBtn.addEventListener("click", async () => {
+  sleepBtn.disabled = true;
+  try {
+    await call("tablet/sleep", {}, "POST");
+  } catch (e) {
+    openModal(`<h2>Couldn't turn the screen off</h2><p class="error">${esc(e.message)}</p>
+      <div class="actions"><button data-close>Close</button></div>`);
+  } finally {
+    sleepBtn.disabled = false;
+  }
+});
 
 connect();
 </script>

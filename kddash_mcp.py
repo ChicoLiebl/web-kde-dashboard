@@ -41,11 +41,18 @@ def _token():
     return os.environ.get("KDDASH_TOKEN") or (CONFIG / "token").read_text().strip()
 
 
-def _request(path, params=None, method="GET"):
+def _request(path, params=None, method="GET", timeout=3):
     query = urllib.parse.urlencode({"t": _token(), **(params or {})})
     req = urllib.request.Request(f"{KDDASH_URL}{path}?{query}", method=method)
-    with urllib.request.urlopen(req, timeout=3) as r:
-        body = r.read()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = r.read()
+    except urllib.error.HTTPError as e:  # the API explains refusals as {"error": "..."}
+        try:
+            message = json.loads(e.read())["error"]
+        except (ValueError, KeyError, TypeError):
+            message = f"the dashboard answered {e.code}"
+        raise RuntimeError(message) from None
     return json.loads(body) if body else None
 
 
@@ -186,6 +193,91 @@ def mark_claude_session_idle(project: str) -> dict:
     for s in targets:
         _request("/api/snooze", {"pid": s["_pid"], "on": 1}, method="POST")
     return {"success": True, "marked_idle": [s["project"] for s in targets]}
+
+
+LIST_MAX = 15  # launchable sessions named in a reply: the most used ones
+
+
+def _launchable(catalog):
+    """Named sessions that can be opened (folder exists), most used first."""
+    return [s for s in catalog["sessions"] if not s["missing"]]
+
+
+@mcp.tool()
+@_errors
+def list_launchable_claude_sessions() -> dict:
+    """List the named Claude Code sessions on the user's PC that are not running and can be opened with
+    launch_claude_session, most used first, with the desktop each one opens on by default.
+    Use when the user asks which Claude sessions or projects they can open, start or resume."""
+    logger.info("list_launchable_claude_sessions()")
+    sessions = [s for s in _launchable(_request("/api/sessions")) if not s["running"]]
+    return {
+        "success": True,
+        "count": len(sessions),
+        "sessions": [{"name": s["name"], "folder": s["short_cwd"], "saved_desktop": s["desktop"]}
+                     for s in sessions[:LIST_MAX]],
+    }
+
+
+@mcp.tool()
+@_errors
+def launch_claude_session(name: str, desktop: int = 0) -> dict:
+    """Open (resume) a named Claude Code session in a kitty terminal on the PC. `name` is the session's
+    name as returned by list_launchable_claude_sessions (spoken forms like "air hub" for "air-hub" are
+    fine). `desktop` is the virtual desktop to open it on (1 = first); leave it 0 to use the session's
+    saved desktop, or the next empty desktop if it has none. It opens as a new tab when that desktop
+    already has a kitty window, otherwise in a new window, and the PC switches to it. If the session is
+    already running, its window is focused instead.
+    Use when the user asks to open, start, launch, resume or continue a Claude session or project."""
+    logger.info(f"launch_claude_session({name!r}, {desktop!r})")
+    want = _norm(name)
+    if not want:
+        return {"success": False, "error": "Please say which session."}
+    catalog = _request("/api/sessions")
+    sessions = _launchable(catalog)
+    matches = [s for s in sessions if _norm(s["name"]) == want] \
+        or [s for s in sessions if want in _norm(s["name"]) or _norm(s["name"]) in want]
+    if not matches:
+        missing = [s for s in catalog["sessions"] if s["missing"] and _norm(s["name"]) == want]
+        if missing:
+            return {"success": False, "error": f"The folder of {missing[0]['name']} no longer exists: "
+                                               f"{missing[0]['short_cwd']}."}
+        names = ", ".join([s["name"] for s in sessions if not s["running"]][:LIST_MAX]) or "none"
+        return {"success": False, "error": f"No Claude session is named {name!r}. Most used: {names}."}
+    if len(matches) > 1:
+        return {"success": False, "error": "Several sessions match; say which one.",
+                "candidates": [s["name"] for s in matches[:LIST_MAX]]}
+    session = matches[0]
+
+    desktops = catalog["desktops"]
+    if desktop:
+        if not 1 <= desktop <= len(desktops):
+            return {"success": False, "error": f"There is no desktop {desktop}; there are {len(desktops)} desktops."}
+    elif session["desktop"] and session["desktop"] <= len(desktops):
+        desktop = session["desktop"]
+    else:  # like the dashboard: the first empty desktop after the current one, else the current one
+        current = next(i for i, d in enumerate(desktops) if d["id"] == _state()["current"])
+        ring = desktops[current + 1:] + desktops[:current + 1]
+        desktop = next((d["number"] for d in ring if d["empty"]), current + 1)
+
+    # Opening a tab or a new window and switching desktops takes a few seconds.
+    result = _request("/api/launch", {"key": session["key"], "desktop": desktop, "remember": 0},
+                      method="POST", timeout=20)
+    how = {"focused": "already running, focused it", "tab": "opened as a new tab",
+           "window": "opened in a new window"}.get(result.get("how"), result.get("how"))
+    return {"success": True, "session": session["name"], "desktop": desktop, "result": how}
+
+
+@mcp.tool()
+@_errors
+def set_tablet_screen(on: bool) -> dict:
+    """Turn the dashboard tablet's screen off (on=false, sleep) or back on (on=true, wake). The tablet is
+    the wall-mounted screen beside the PC that shows the desktops dashboard.
+    Use when the user asks to turn off, sleep or switch off the tablet or dashboard screen (e.g. at
+    bedtime), or to turn it back on or wake it."""
+    logger.info(f"set_tablet_screen({on!r})")
+    _request("/api/tablet/wake" if on else "/api/tablet/sleep", method="POST", timeout=20)
+    return {"success": True, "screen": "on" if on else "off"}
 
 
 @mcp.tool()

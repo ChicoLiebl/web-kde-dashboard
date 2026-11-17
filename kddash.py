@@ -389,6 +389,73 @@ def sessions_payload():
     return {"sessions": launcher.catalog(), "desktops": desktops}
 
 
+# ---------------------------------------------------------------- tablet screen (Android, over ADB)
+#
+# The tablet's own "Sleep" button: kddash sends the power keys over network ADB (port 5555) to the
+# device that asked, so nothing needs configuring. Wall-mounted Android panels usually ship with it
+# on; other tablets need wireless debugging. The last tablet seen is remembered so the PC (or the
+# MCP server) can wake it while its screen is off.
+
+ADB_PORT = 5555
+TABLET_FILE = CONFIG / "tablet"
+
+
+def client_ip(writer):
+    ip = writer.get_extra_info("peername")[0]
+    return ip.removeprefix("::ffff:")
+
+
+async def port_open(ip, port, timeout=1.0):
+    try:
+        _, w = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout)
+    except (OSError, asyncio.TimeoutError):
+        return False
+    w.close()
+    return True
+
+
+async def run(*cmd, timeout=10):
+    proc = await asyncio.create_subprocess_exec(*cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                                stderr=subprocess.STDOUT)
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise RuntimeError(f"{cmd[0]} timed out")
+    return proc.returncode, out.decode(errors="replace").strip()
+
+
+def tablet_target(writer):
+    """The device to act on: the one asking, or the remembered tablet when the PC itself asks (MCP)."""
+    ip = client_ip(writer)
+    if ip not in ("127.0.0.1", "::1"):
+        return ip
+    try:
+        return TABLET_FILE.read_text().strip()
+    except FileNotFoundError:
+        raise RuntimeError("no tablet known yet: open the dashboard on the tablet once") from None
+
+
+async def tablet_key(ip, key):
+    """Send an Android key event (KEYCODE_SLEEP / KEYCODE_WAKEUP) to the device at `ip`."""
+    if not shutil.which("adb"):
+        raise RuntimeError("adb is not installed on the PC (Arch: android-tools)")
+    serial = f"{ip}:{ADB_PORT}"
+    # Started on its own so its long-lived daemon never holds the pipes we read below.
+    start = await asyncio.create_subprocess_exec("adb", "start-server", stdin=subprocess.DEVNULL,
+                                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    await asyncio.wait_for(start.wait(), 10)
+    rc, out = await run("adb", "connect", serial)
+    if rc or not out.startswith(("connected", "already connected")):
+        raise RuntimeError(f"can't reach the tablet over ADB ({serial}): {out}")
+    rc, out = await run("adb", "-s", serial, "shell", "input", "keyevent", key)
+    if rc:
+        if "unauthorized" in out:
+            out = "accept the 'Allow USB debugging' prompt on the tablet, then try again"
+        raise RuntimeError(f"tablet refused: {out}")
+    TABLET_FILE.write_text(ip + "\n")
+
+
 # ---------------------------------------------------------------- HTTP
 
 def token():
@@ -453,6 +520,20 @@ async def handle(reader, writer):
 
         if path == "/api/activate" and method_ == "POST":
             await activate(q.get("window"), q.get("desktop"))
+            return await respond(writer, "204 No Content")
+
+        if path == "/api/tablet":  # can this device's screen be turned off from here?
+            ip = client_ip(writer)
+            ok = ip not in ("127.0.0.1", "::1") and await port_open(ip, ADB_PORT)
+            if ok:
+                TABLET_FILE.write_text(ip + "\n")  # so the PC can wake it later
+            return await respond(writer, "200 OK", json.dumps({"sleep": ok}), "application/json")
+
+        if path in ("/api/tablet/sleep", "/api/tablet/wake") and method_ == "POST":
+            try:
+                await tablet_key(tablet_target(writer), "KEYCODE_SLEEP" if path.endswith("sleep") else "KEYCODE_WAKEUP")
+            except (RuntimeError, OSError) as e:
+                return await respond(writer, "409 Conflict", json.dumps({"error": str(e)}), "application/json")
             return await respond(writer, "204 No Content")
 
         if path == "/api/snooze" and method_ == "POST":
