@@ -94,9 +94,20 @@ the device that tapped it, so there is nothing to configure.
   `adb tcpip 5555`.
 - The first time, the tablet may ask to **Allow USB debugging** from this PC. Tick "Always allow".
 
-To turn the screen back on, touch it. That works on many panels, but some ignore touch while the screen
-is off. Otherwise press the tablet's power button, or wake it from the PC. kddash remembers the last
-tablet that opened the dashboard:
+kddash also wakes the tablet when you unlock the PC. It listens for Plasma's
+`org.freedesktop.ScreenSaver.ActiveChanged(false)` signal. To turn that off, set
+`KDDASH_WAKE_ON_UNLOCK=0` in the service:
+
+```bash
+systemctl --user edit kddash
+# add these two lines in the editor:
+#   [Service]
+#   Environment=KDDASH_WAKE_ON_UNLOCK=0
+```
+
+To turn the screen back on by hand, touch it. That works on many panels, but some ignore touch while the
+screen is off. Otherwise press the tablet's power button, or wake it from the PC. kddash remembers the
+last tablet that opened the dashboard:
 
 ```bash
 curl -X POST "http://127.0.0.1:8765/api/tablet/wake?t=$(cat ~/.config/kddash/token)"

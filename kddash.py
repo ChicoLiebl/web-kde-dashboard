@@ -21,7 +21,7 @@ import tempfile
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from dbus_next import NameFlag, RequestNameReply
+from dbus_next import Message, MessageType, NameFlag, RequestNameReply
 from dbus_next.aio import MessageBus
 from dbus_next.service import ServiceInterface, method
 
@@ -201,7 +201,6 @@ def snooze(pid, on):
 
 
 async def kwin_call(path, iface, member, signature="", body=()):
-    from dbus_next import Message, MessageType
     reply = await bus.call(Message(destination="org.kde.KWin", path=path, interface=iface,
                                    member=member, signature=signature, body=list(body)))
     if reply.message_type == MessageType.ERROR:
@@ -456,6 +455,40 @@ async def tablet_key(ip, key):
     TABLET_FILE.write_text(ip + "\n")
 
 
+# Wake the tablet when the PC's lock screen goes away (Plasma's org.freedesktop.ScreenSaver signal;
+# it's sent on two object paths, so only one is used). KDDASH_WAKE_ON_UNLOCK=0 turns this off.
+WAKE_ON_UNLOCK = os.environ.get("KDDASH_WAKE_ON_UNLOCK", "1") != "0"
+UNLOCK_MATCH = "type='signal',interface='org.freedesktop.ScreenSaver',member='ActiveChanged',path='/ScreenSaver'"
+background: set[asyncio.Task] = set()
+
+
+async def wake_tablet_on_unlock():
+    try:
+        ip = TABLET_FILE.read_text().strip()
+    except FileNotFoundError:
+        return
+    try:
+        await tablet_key(ip, "KEYCODE_WAKEUP")
+        print(f"PC unlocked: woke tablet {ip}", flush=True)
+    except (RuntimeError, OSError) as e:
+        print(f"PC unlocked: couldn't wake tablet {ip}: {e}", file=sys.stderr, flush=True)
+
+
+def on_bus_message(msg):
+    if (msg.message_type == MessageType.SIGNAL and msg.interface == "org.freedesktop.ScreenSaver"
+            and msg.member == "ActiveChanged" and msg.path == "/ScreenSaver" and msg.body == [False]):
+        task = asyncio.create_task(wake_tablet_on_unlock())
+        background.add(task)
+        task.add_done_callback(background.discard)
+
+
+async def watch_unlock():
+    bus.add_message_handler(on_bus_message)
+    await bus.call(Message(destination="org.freedesktop.DBus", path="/org/freedesktop/DBus",
+                           interface="org.freedesktop.DBus", member="AddMatch", signature="s",
+                           body=[UNLOCK_MATCH]))
+
+
 # ---------------------------------------------------------------- HTTP
 
 def token():
@@ -581,6 +614,9 @@ async def main():
     if await bus.request_name("org.kddash", NameFlag.DO_NOT_QUEUE) != RequestNameReply.PRIMARY_OWNER:
         sys.exit("kddash: another kddash already owns org.kddash on the session bus "
                  "(stop it first: systemctl --user stop kddash)")
+
+    if WAKE_ON_UNLOCK:
+        await watch_unlock()
 
     server = await asyncio.start_server(handle, "0.0.0.0", PORT)
     tasks = [asyncio.create_task(ensure_kwin_script()), asyncio.create_task(poll())]  # noqa: F841 (keep references)

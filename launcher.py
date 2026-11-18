@@ -96,14 +96,19 @@ def _scan(path, mtime):
     return info
 
 
-def _resolve_cwd(info):
-    """The session's folder: where it started if that still exists; otherwise the most recently recorded
-    folder that exists (Claude appends to the same file when a moved project is resumed from its new
-    folder). Not cached: folders move."""
+def _resolve_cwd(sid, info):
+    """The session's folder: the newest folder you started or resumed it in that still exists (from
+    history.jsonl, so a moved project resumed from its new folder is followed). Without history, the
+    session file: where it started, else the newest recorded folder that isn't inside another recorded
+    one (the file's `cwd` follows Claude's shell when it `cd`s into subfolders). Not cached: folders move."""
+    for c in reversed(launch_folders(sid)):
+        if os.path.isdir(c):
+            return c
     first, recent = info["cwd_first"], info["cwd_recent"]
     if first and os.path.isdir(first):
         return first
-    for c in reversed(recent):
+    roots = [c for c in recent if not any(c.startswith(o.rstrip("/") + "/") for o in recent)]
+    for c in reversed(roots):
         if os.path.isdir(c):
             return c
     return first or (recent[-1] if recent else None)
@@ -123,36 +128,51 @@ def named_sessions():
         except OSError:
             continue
         info = _scan(f, mtime)
-        cwd = _resolve_cwd(info)
+        cwd = _resolve_cwd(f.stem, info)
         if info["name"] and cwd:
             out[f.stem] = {"name": info["name"], "title": info["title"], "cwd": cwd, "mtime": mtime}
     return out
 
 
-_usage_cache: dict = {"key": None, "times": {}}
+_history_cache: dict = {"key": None, "times": {}, "projects": {}}
 
 
-def _prompt_times():
-    """session id -> timestamps (s) of the prompts you typed into it, from ~/.claude/history.jsonl."""
+def _history():
+    """From ~/.claude/history.jsonl, per session id: the timestamps (s) of the prompts you typed into it,
+    and the folders Claude was started in when you typed them (distinct, oldest -> newest)."""
     try:
         st = HISTORY.stat()
     except OSError:
-        return {}
-    if _usage_cache["key"] != (st.st_mtime, st.st_size):
-        times = {}
+        return _history_cache
+    if _history_cache["key"] != (st.st_mtime, st.st_size):
+        times, projects = {}, {}
         with open(HISTORY, "rb") as fh:
             for line in fh:
-                m = re.search(rb'"timestamp":(\d+).*?"sessionId":"([^"]+)"', line)
-                if m:
-                    times.setdefault(m.group(2).decode(), []).append(int(m.group(1)) / 1000)
-        _usage_cache.update(key=(st.st_mtime, st.st_size), times=times)
-    return _usage_cache["times"]
+                try:
+                    d = json.loads(line)
+                    sid, ts = d["sessionId"], d["timestamp"] / 1000
+                except (ValueError, KeyError, TypeError):
+                    continue
+                times.setdefault(sid, []).append(ts)
+                if d.get("project"):
+                    seen = projects.setdefault(sid, [])
+                    if d["project"] in seen:
+                        seen.remove(d["project"])
+                    seen.append(d["project"])
+        _history_cache.update(key=(st.st_mtime, st.st_size), times=times, projects=projects)
+    return _history_cache
+
+
+def launch_folders(sid):
+    """Folders the session was started (or resumed) in, newest last. Unlike the session file's `cwd`,
+    these don't follow Claude's shell into subfolders."""
+    return _history()["projects"].get(sid, [])
 
 
 def usage(sid):
     """{prompts, last_used, score}: score counts each prompt once, its weight halving every
     USAGE_HALF_LIFE_DAYS, so sessions you use a lot *lately* rank first."""
-    times = _prompt_times().get(sid, [])
+    times = _history()["times"].get(sid, [])
     now = time.time()
     score = sum(0.5 ** ((now - t) / 86400 / USAGE_HALF_LIFE_DAYS) for t in times)
     return {"prompts": len(times), "last_used": max(times, default=0), "score": round(score, 3)}
