@@ -33,6 +33,12 @@ SPOKEN_STATUS = {
     "done": "finished, waiting for you",
     "unknown": "unknown",
 }
+# What a working session is doing right now (the dashboard's crab pose) -> spoken words.
+SPOKEN_ACTIVITY = {
+    "read": "reading files", "write": "editing files", "bash": "running commands",
+    "web": "searching the web", "delegate": "running subagents", "plan": "planning",
+    "think": "thinking", "run": "using a tool",
+}
 
 mcp = FastMCP("KDEDesktops")
 
@@ -73,6 +79,8 @@ def _sessions(state):
                 "desktop": number.get(w["desktops"][0]) if w["desktops"] else None,
                 "project": c["project"],
                 "status": "marked idle" if c["snoozed"] else SPOKEN_STATUS.get(c["status"], c["status"]),
+                "kind": c.get("kind", "software"),
+                **({"doing": SPOKEN_ACTIVITY[c["activity"]]} if c.get("activity") in SPOKEN_ACTIVITY else {}),
                 "task": c["title"][:TITLE_MAX],
                 "_window": w["id"],
                 "_pid": c["pid"],
@@ -108,8 +116,9 @@ def _errors(fn):
 @_errors
 def list_claude_sessions() -> dict:
     """List the Claude Code sessions running on the user's PC: which virtual desktop each is on,
-    its project name, its status (working, needs your input, finished and waiting, marked idle)
-    and a short description of its task. Also returns how many are working or waiting.
+    its project name, the kind of work (firmware, pcb, software or cad), its status (working, needs
+    your input, finished and waiting, marked idle), what a working one is doing right now, and a
+    short description of its task. Also returns how many are working or waiting.
     Use when the user asks about their Claude sessions, agents, what is running or working,
     whether anything is done or needs them, or which desktop something is on."""
     logger.info("list_claude_sessions()")

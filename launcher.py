@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shlex
+import sys
 import time
 from pathlib import Path
 
@@ -214,23 +215,49 @@ def running_session_ids():
 
 # ------------------------------------------------------------------ catalog
 
+def _saved_cwd(e, sid, info):
+    """The folder to open a saved session in: the saved one, unless
+    - it's gone (moved by hand): then the folder the session itself records;
+    - you have resumed the session from another folder since (the saved folder is an older launch
+      folder in history.jsonl): then the newest launch folder that exists.
+    A saved folder the session never ran in was set on purpose (e.g. with ccm), so it stays."""
+    saved = e["cwd"]
+    if not os.path.isdir(saved):
+        return info.get("cwd") or saved
+    folders = launch_folders(sid) if sid else []
+    newest = next((c for c in reversed(folders) if os.path.isdir(c)), None)
+    if newest and newest != saved and saved in folders:
+        return newest
+    return saved
+
+
 def catalog():
-    """Saved sessions (registry) plus named sessions that aren't saved, most used first (see usage())."""
+    """Saved sessions (registry) plus named sessions that aren't saved, most used first (see usage()).
+    Saved folders that the session has moved away from are corrected in the registry too, so ccm
+    follows."""
     reg = load_registry()
     named = named_sessions()
     running = running_session_ids()
-    out, seen = [], set()
+    out, seen, moved = [], set(), {}
     for name, e in reg.items():
         sid = e.get("session_id")
         info = named.get(sid, {})
+        cwd = _saved_cwd(e, sid, info)
+        if cwd != e["cwd"] and os.path.isdir(cwd):
+            moved[name] = cwd
         out.append({
-            # A saved folder that's gone (moved by hand) loses to the one the session file now records.
-            "key": sid or f"ccm:{name}", "name": name, "session_id": sid,
-            "cwd": e["cwd"] if os.path.isdir(e["cwd"]) or not info.get("cwd") else info["cwd"],
+            "key": sid or f"ccm:{name}", "name": name, "session_id": sid, "cwd": cwd,
             "desktop": e.get("desktop"), "shell_pct": e.get("shell_pct", DEFAULT_SHELL_PCT),
             "saved": True, "title": info.get("title", ""), "mtime": info.get("mtime", 0),
         })
         seen.add(sid)
+    if moved:
+        fresh = load_registry()  # re-read: only change the folders, keep anything saved meanwhile
+        for name, cwd in moved.items():
+            if name in fresh:
+                print(f"session {name!r}: folder {fresh[name]['cwd']} -> {cwd}", file=sys.stderr)
+                fresh[name]["cwd"] = cwd
+        save_registry(fresh)
     for sid, info in named.items():
         if sid in seen:
             continue

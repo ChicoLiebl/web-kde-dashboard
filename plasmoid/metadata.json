@@ -1,0 +1,12 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Category": "Windows and Tasks",
+        "Description": "Your desktops and the Claude Code sessions on them, as on the kddash tablet screen",
+        "Icon": "utilities-terminal",
+        "Id": "local.kddash.desktops",
+        "Name": "Claude Desktops",
+        "Version": "1.0"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0"
+}

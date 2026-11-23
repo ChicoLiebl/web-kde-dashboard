@@ -88,3 +88,10 @@ if command -v kitty >/dev/null \
     echo '  listen_on unix:${XDG_RUNTIME_DIR}/kitty-{kitty_pid}.sock'
     echo "then restart your kitty windows. See README.md, \"Launching sessions\"."
 fi
+
+if command -v kpackagetool6 >/dev/null && [[ ! -d "${XDG_DATA_HOME:-$HOME/.local/share}/plasma/plasmoids/local.kddash.desktops" ]]; then
+    echo
+    echo "Optional panel widget (the Desktops screen in a popup from the top bar):"
+    echo "  kpackagetool6 -t Plasma/Applet -i $REPO/plasmoid"
+    echo "then Edit Mode -> Add Widgets... -> \"Claude Desktops\". See README.md, \"Panel widget\"."
+fi

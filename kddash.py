@@ -10,6 +10,7 @@ stream the result to browsers via Server-Sent Events.
 import asyncio
 import itertools
 import json
+import re
 import os
 import secrets
 import signal
@@ -26,6 +27,9 @@ from dbus_next.aio import MessageBus
 from dbus_next.service import ServiceInterface, method
 
 import launcher
+import tasks
+import kinds
+from kinds import session_kind
 
 HERE = Path(__file__).resolve().parent
 KWIN_SCRIPT = HERE / "kwin" / "kddash.js"
@@ -81,8 +85,8 @@ def process_tree():
     return children, comm
 
 
-def claude_pids_under(pid, children, comm):
-    out, stack = [], list(children.get(pid, []))
+def claude_pids_under(pid, children, comm, include_self=False):
+    out, stack = [], [pid] if include_self else list(children.get(pid, []))
     while stack:
         p = stack.pop()
         if comm.get(p) == "claude":
@@ -99,6 +103,79 @@ def caption_status(caption):
     if glyph and not glyph.isalnum() and ord(glyph) > 127:
         return "working"
     return None
+
+
+# ---------------------------------------------------------------- what a session is doing
+
+# What a working session is doing right now, from the newest entry of its transcript
+# (~/.claude/projects/<folder>/<sessionId>.jsonl): the tool it called, or "think".
+PROJECTS_DIR = Path.home() / ".claude" / "projects"
+TRANSCRIPT_TAILS = (64 * 1024, 1024 * 1024)
+TOOL_ACTIVITY = {
+    "read": "read", "grep": "read", "glob": "read", "ls": "read",
+    "edit": "write", "write": "write", "multiedit": "write", "notebookedit": "write",
+    "bash": "bash", "bashoutput": "bash", "killshell": "bash", "killbash": "bash", "monitor": "bash",
+    "webfetch": "web", "websearch": "web",
+    "agent": "delegate", "task": "delegate", "workflow": "delegate",
+    "todowrite": "plan", "taskcreate": "plan", "taskupdate": "plan", "enterplanmode": "plan",
+}
+_transcripts: dict[str, Path | None] = {}  # sessionId -> transcript path
+_activity: dict[str, tuple] = {}  # sessionId -> ((size, mtime), activity)
+
+
+def transcript_path(session_id):
+    path = _transcripts.get(session_id)
+    if path is None or not path.exists():
+        path = next(PROJECTS_DIR.glob(f"*/{session_id}.jsonl"), None)
+        _transcripts[session_id] = path
+    return path
+
+
+def entry_activity(entry):
+    """What a transcript entry says the session is doing, or None for entries that don't say
+    (system notes, progress, file snapshots…). A prompt or a tool's result going back to the model
+    means it's thinking."""
+    if entry.get("type") not in ("assistant", "user") or entry.get("isMeta"):
+        return None
+    content = (entry.get("message") or {}).get("content") or []
+    block = content[-1] if isinstance(content, list) and content else {}
+    if entry["type"] == "assistant" and block.get("type") == "tool_use":
+        return TOOL_ACTIVITY.get(block.get("name", "").lower(), "run")
+    return "think"
+
+
+def transcript_activity(session_id):
+    if not session_id:
+        return None
+    try:
+        path = transcript_path(session_id)
+        if not path:
+            return None
+        st = path.stat()
+        stamp = (st.st_size, st.st_mtime_ns)
+        cached = _activity.get(session_id)
+        if cached and cached[0] == stamp:
+            return cached[1]
+        activity = None
+        for tail in TRANSCRIPT_TAILS:  # some entries (API request copies) are huge: read more if needed
+            with path.open("rb") as f:
+                f.seek(max(0, st.st_size - tail))
+                lines = f.read().split(b"\n")
+            for line in reversed(lines[1:] if st.st_size > tail else lines):  # [0] may be cut
+                if b'"assistant"' not in line and b'"user"' not in line:
+                    continue
+                try:
+                    activity = entry_activity(json.loads(line))
+                except ValueError:
+                    continue
+                if activity:
+                    break
+            if activity or st.st_size <= tail:
+                break
+        _activity[session_id] = (stamp, activity)
+        return activity
+    except OSError:
+        return None
 
 
 def session_info(pid, caption, only_session):
@@ -123,7 +200,189 @@ def session_info(pid, caption, only_session):
         "title": last_title.get(pid) or meta.get("name") or "",
         "waitingFor": meta.get("waitingFor"),
         "status": status, "snoozed": pid in snoozed,
+        "kind": session_kind(cwd, meta.get("name") or ""),
+        "activity": transcript_activity(meta.get("sessionId")) if status == "working" else None,
     }
+
+
+# One kitty process can own several windows on screen, e.g. after a tab is dragged out of a window
+# onto another desktop. KWin gives them all the same pid, so the process tree alone would show every
+# session of that kitty on each of them. For those, kitty itself says (over its remote-control socket)
+# which tabs, and so which processes, each window holds. Wayland gives no window id to match on, but
+# a kitty window's title is its active tab's title, which is the caption KWin sees.
+# kitty pid -> [{"title": active title, "titles": every tab/split title, "roots": pids of its programs}]
+kitty_windows: dict[int, list[dict]] = {}
+
+
+def norm_title(title):
+    """A title without Claude's leading status glyph, which changes several times a second."""
+    return re.sub(r"^\W+", "", title or "").strip()
+
+
+async def refresh_kitty_windows(raw):
+    pids = [w["pid"] for w in raw["windows"] if w["cls"] in launcher.KITTY_CLASSES]
+    shared = {p for p in pids if pids.count(p) > 1}
+    for pid in list(kitty_windows):
+        if pid not in shared:
+            del kitty_windows[pid]
+    for pid in shared:
+        sock = launcher.kitty_socket(pid)
+        if not sock:
+            continue
+        try:
+            os_windows = json.loads(await kitten(sock, "ls"))
+        except (RuntimeError, OSError, ValueError, asyncio.TimeoutError):
+            kitty_windows.pop(pid, None)
+            continue
+        layout = []
+        for ow in os_windows:
+            tab = next((t for t in ow["tabs"] if t.get("is_active")), ow["tabs"][0] if ow["tabs"] else None)
+            win = next((w for w in tab["windows"] if w.get("is_active")), None) if tab else None
+            layout.append({"title": norm_title(win["title"] if win else tab and tab["title"]),
+                           "titles": {norm_title(w["title"]) for t in ow["tabs"] for w in t["windows"]},
+                           "roots": [w["pid"] for t in ow["tabs"] for w in t["windows"]]})
+        kitty_windows[pid] = layout
+
+
+# ---------------------------------------------------------------- kitty backgrounds by kind
+#
+# Every kitty window with a Claude session gets a background pattern for the session's kind of work
+# (kinds.py, drawn by patterns.py), so you can tell at a glance which session you're in. That
+# includes sessions started by ccm or by hand, not only ones launched from the dashboard. kitty sets
+# background images per window, not per tab: a window whose tabs are of different kinds shows the
+# pattern of its active tab. The pattern goes when the window's sessions exit, and from every window
+# when the patterns are turned off (Sessions settings, or backgrounds.json).
+
+PATTERN_REFRESH = 60  # seconds; a pass this often also catches a kitty switching dark/light theme
+patterned: dict[tuple, str] = {}  # (kitty pid, OS window id) -> image we set
+_pattern_key = None  # the Claude sessions per kitty (and the windows' active tabs) at the last pass
+_pattern_at = 0.0
+
+
+def pattern_targets():
+    """kitty pid -> {claude pid: kind}, and a key that changes when those or the active tabs do."""
+    out, captions = {}, []
+    for w in state["windows"]:
+        if w["cls"] in launcher.KITTY_CLASSES and w.get("claude"):
+            captions.append((w["pid"], norm_title(w["caption"])))
+            for c in w["claude"]:
+                out.setdefault(w["pid"], {})[c["pid"]] = c["kind"]
+    return out, sorted((k, sorted(v.items())) for k, v in out.items()) + sorted(captions)
+
+
+async def kitty_background(sock):
+    """The theme's background (what kitty.conf and its auto theme say)."""
+    out = await kitten(sock, "get-colors", "--configured")
+    m = re.search(r"^background\s+(#[0-9a-fA-F]{6})", out, re.M)
+    return m.group(1) if m else "#000000"
+
+
+async def set_pattern(sock, window_id, image):
+    await kitten(sock, "set-background-image", "--match", f"id:{window_id}",
+                 *(["--layout", "tiled", str(image)] if image else ["none"]))
+
+
+def os_window_kind(ow, sessions, children, comm):
+    """The kind of the OS window's active tab, else the one kind all its sessions share, else None."""
+    tab_kinds = []
+    for tab in ow["tabs"]:
+        found = {sessions[p] for w in tab["windows"]
+                 for p in claude_pids_under(w["pid"], children, comm, include_self=True) if p in sessions}
+        tab_kinds.append((tab.get("is_active"), found))
+    active = next((k for is_active, k in tab_kinds if is_active), set())
+    if len(active) == 1:
+        return next(iter(active))
+    every = set().union(*(k for _, k in tab_kinds))
+    return next(iter(every)) if len(every) == 1 else None
+
+
+async def pattern_kitty(kpid, sock, sessions, colors, children, comm):
+    base = await kitty_background(sock)
+    for ow in json.loads(await kitten(sock, "ls")):
+        first = next((w["id"] for t in ow["tabs"] for w in t["windows"]), None)
+        if first is None:
+            continue
+        key = (kpid, ow["id"])
+        kind = os_window_kind(ow, sessions, children, comm)
+        image = await asyncio.to_thread(kinds.pattern_image, kind, base, colors) if kind else None
+        image = str(image) if image else None
+        if image != patterned.get(key) and (image or key in patterned):
+            await set_pattern(sock, first, image)
+        if image:
+            patterned[key] = image
+        else:
+            patterned.pop(key, None)
+
+
+async def pattern_kitty_windows():
+    global _pattern_key, _pattern_at
+    targets, key = pattern_targets()
+    now = asyncio.get_running_loop().time()
+    due = now - _pattern_at >= PATTERN_REFRESH
+    if key == _pattern_key and not due:
+        return
+    _pattern_key = key
+    if due:
+        _pattern_at = now
+    settings = kinds.background_settings()
+    if not settings["enabled"]:
+        if patterned:  # turned off by editing backgrounds.json
+            await unpattern_all()
+        return
+    children, comm = process_tree()
+    for kpid in set(targets) | {k[0] for k in patterned}:
+        sock = launcher.kitty_socket(kpid)
+        if not sock:  # that kitty is gone
+            for k in [k for k in patterned if k[0] == kpid]:
+                del patterned[k]
+            continue
+        try:
+            await pattern_kitty(kpid, sock, targets.get(kpid, {}), settings["colors"], children, comm)
+        except (RuntimeError, OSError, ValueError, KeyError, subprocess.SubprocessError, asyncio.TimeoutError) as e:
+            print(f"kitty {kpid} background: {e}", file=sys.stderr)
+
+
+async def unpattern_all():
+    for kpid in {k[0] for k in patterned}:
+        sock = launcher.kitty_socket(kpid)
+        try:
+            windows = {ow["id"]: next((w["id"] for t in ow["tabs"] for w in t["windows"]), None)
+                       for ow in json.loads(await kitten(sock, "ls"))} if sock else {}
+        except (RuntimeError, OSError, ValueError, asyncio.TimeoutError):
+            windows = {}
+        for key in [k for k in patterned if k[0] == kpid]:
+            del patterned[key]
+            if windows.get(key[1]):
+                try:
+                    await set_pattern(sock, windows[key[1]], None)
+                except (RuntimeError, OSError, asyncio.TimeoutError):
+                    pass  # that window has closed
+
+
+async def set_patterns(on):
+    global _pattern_key
+    kinds.set_backgrounds_enabled(on)
+    if on:
+        _pattern_key = None  # set them on the next poll
+    else:
+        await unpattern_all()
+
+
+def window_claude_pids(w, children, comm):
+    """Claude processes in this window: from kitty's own layout when its process has several windows
+    and the caption picks exactly one of them, else everything under the window's process."""
+    layout = kitty_windows.get(w["pid"])
+    if layout:
+        caption = norm_title(w["caption"])
+        # The active title is exact; any of a window's titles still matches right after you switch
+        # tabs, before the next refresh of the layout.
+        mine = [ow for ow in layout if ow["title"] == caption]
+        if len(mine) != 1:
+            mine = [ow for ow in layout if caption in ow["titles"]]
+        if len(mine) == 1:
+            return sorted({c for root in mine[0]["roots"]
+                           for c in claude_pids_under(root, children, comm, include_self=True)})
+    return claude_pids_under(w["pid"], children, comm)
 
 
 def enrich(raw):
@@ -131,7 +390,7 @@ def enrich(raw):
     windows, seen = [], set()
     for w in raw["windows"]:
         w = dict(w)
-        pids = claude_pids_under(w["pid"], children, comm)
+        pids = window_claude_pids(w, children, comm)
         if pids:
             w["claude"] = [session_info(p, w["caption"], len(pids) == 1) for p in pids]
             seen.update(pids)
@@ -186,7 +445,16 @@ def broadcast():
 async def poll():
     while True:
         await asyncio.sleep(POLL_INTERVAL)
+        if raw_state is not None:
+            try:
+                await refresh_kitty_windows(raw_state)
+            except Exception as e:  # keep polling whatever kitty answers
+                print("kitty layout:", e, file=sys.stderr)
         broadcast()
+        try:
+            await pattern_kitty_windows()
+        except Exception as e:  # patterns are cosmetic; never stop the poll over them
+            print("kitty backgrounds:", e, file=sys.stderr)
 
 
 def snooze(pid, on):
@@ -521,7 +789,7 @@ async def handle(reader, writer):
         q = {k: v[0] for k, v in parse_qs(url.query).items()}
         path = url.path
 
-        if path in ("/", "/index.html", "/manifest.json", "/icon.svg"):
+        if path in ("/", "/index.html", "/manifest.json", "/icon.svg", "/crabs.js"):
             f = STATIC / ("index.html" if path == "/" else path.lstrip("/"))
             return await respond(writer, "200 OK", f.read_bytes(), CTYPES[f.suffix])
 
@@ -555,6 +823,13 @@ async def handle(reader, writer):
             await activate(q.get("window"), q.get("desktop"))
             return await respond(writer, "204 No Content")
 
+        if path == "/api/tasks":
+            try:
+                data = await asyncio.to_thread(tasks.today_tasks, q.get("refresh") == "1")
+            except tasks.TaskHubError as e:
+                return await respond(writer, "502 Bad Gateway", json.dumps({"error": str(e)}), "application/json")
+            return await respond(writer, "200 OK", json.dumps(data), "application/json")
+
         if path == "/api/tablet":  # can this device's screen be turned off from here?
             ip = client_ip(writer)
             ok = ip not in ("127.0.0.1", "::1") and await port_open(ip, ADB_PORT)
@@ -572,6 +847,11 @@ async def handle(reader, writer):
         if path == "/api/snooze" and method_ == "POST":
             snooze(int(q.get("pid", 0)), q.get("on") == "1")
             return await respond(writer, "204 No Content")
+
+        if path == "/api/kitty-colors":
+            if method_ == "POST":
+                await set_patterns(q.get("enabled") == "1")
+            return await respond(writer, "200 OK", json.dumps(kinds.background_settings()), "application/json")
 
         if path == "/api/sessions":
             return await respond(writer, "200 OK", json.dumps(sessions_payload()), "application/json")
