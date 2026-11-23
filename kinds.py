@@ -132,11 +132,16 @@ def pattern_image(kind, base, colors):
     name = PATTERN.get(kind)
     if not color or not name or not COLOR.match(base):
         return None
-    png = CACHE / f"{name}-{color[1:]}-on-{base[1:]}.png"
-    src = Path(patterns.__file__)
-    if png.exists() and png.stat().st_mtime >= src.stat().st_mtime:
+    # The name carries the version of patterns.py, so a redrawn pattern gets a new path and kddash
+    # sets it again on windows that already show the old one.
+    version = int(Path(patterns.__file__).stat().st_mtime)
+    stem = f"{name}-{color[1:]}-on-{base[1:]}"
+    png = CACHE / f"{stem}-{version}.png"
+    if png.exists():
         return png
     CACHE.mkdir(parents=True, exist_ok=True)
+    for old in CACHE.glob(f"{stem}-*.png"):
+        old.unlink(missing_ok=True)
     svg = png.with_suffix(".svg")
     svg.write_text(patterns.DRAW[name](color, base, light))
     tmp = png.with_suffix(".tmp.png")

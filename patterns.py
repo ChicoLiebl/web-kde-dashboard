@@ -179,55 +179,67 @@ def icon_graph(color, bg, light, seed=21):
 # ---------------------------------------------------------------- CAD: a 3D field of wireframe blocks
 
 def iso_blocks(color, bg, light, seed=9):
-    """Blocks of different heights standing on an isometric floor, in 2:1 pixel isometric so the
-    floor's lattice repeats on whole pixels (one cell is 4u wide and 2u tall)."""
+    """Blocks of different sizes and heights standing in clusters on an isometric floor, with open
+    floor between the clusters. 2:1 pixel isometric, so the floor's lattice repeats on whole pixels
+    (one cell is 4u wide and 2u tall)."""
     rnd = random.Random(seed)
-    T, u = 480, 12
+    T, u = 720, 18
     D, S = T // (4 * u) * 2, T // u  # cells repeat every D steps of i-j and S steps of i+j
     P = lambda i, j: (2 * u * (i - j), u * (i + j))
-    bright = mix(color, "#ffffff" if not light else "#000000", .35)
+    cell = lambda i, j: ((i - j) % D, (i + j) % S)
+    bright = mix(color, "#ffffff" if not light else "#000000", .15)
     floor = []
     cells = [(d, s) for d in range(D) for s in range(S) if (d + s) % 2 == 0]
     for d, s in cells:
         i, j = (s + d) // 2, (s - d) // 2
         (x0, y0), (x1, y1), (x3, y3) = P(i, j), P(i + 1, j), P(i, j + 1)
         floor.append(f'<path d="M{x3},{y3} L{x0},{y0} L{x1},{y1}" class="floor"/>')
-    # blocks and light pillars, painted back to front so nearer ones hide what's behind them
-    items = []
-    for d, s in cells:
-        r = rnd.random()
+    # Blocks gather around a few centres; the floor between them stays open.
+    centres = [(rnd.uniform(0, T), rnd.uniform(0, T)) for _ in range(3)]
+    def near(i, j):
+        x, y = P(i + .5, j + .5)
+        return max(math.exp(-(wrapd(x, cx, T) ** 2 + wrapd(y, cy, T) ** 2) / (2 * 120 ** 2)) for cx, cy in centres)
+    used, items = set(), []
+    order = cells[:]
+    rnd.shuffle(order)
+    for d, s in order:
         i, j = (s + d) // 2, (s - d) // 2
-        if r < .11:
-            items.append(("block", i, j, rnd.choice([1, 2, 2, 3, 4, 5]) * u * .8))
-        elif r < .16:
-            items.append(("pillar", i, j, rnd.uniform(1.5, 7) * u))
+        r = rnd.random()
+        if r < .45 * near(i, j):
+            n = 2 if rnd.random() < .4 else 1  # footprint: 1×1 or 2×2 cells
+            foot = {cell(i + a, j + b) for a in range(-1, n + 1) for b in range(-1, n + 1)}  # with a gap around
+            if foot & used:
+                continue
+            used |= foot
+            items.append(("block", i, j, n, rnd.choice([1, 2, 2, 3, 4]) * u * (.9 if n == 1 else 1.1)))
+        elif r > .985:
+            items.append(("pillar", i, j, 1, rnd.uniform(1.5, 5) * u))
     drawn = []
-    for kind, i, j, h in items:
+    for kind, i, j, n, h in items:
         for oi, oj in [(a + b, b - a) for a in (-D // 2, 0, D // 2) for b in (-S // 2, 0, S // 2)]:
             ii, jj = i + oi, j + oj  # the same item one tile left/right (a) and up/down (b)
-            x2, y2 = P(ii + 1, jj + 1)
-            if not (-80 < x2 < T + 80 and -20 < y2 < T + 140):
+            x2, y2 = P(ii + n, jj + n)
+            if not (-160 < x2 < T + 160 and -20 < y2 < T + 220):
                 continue
-            drawn.append((y2, kind, ii, jj, h))
+            drawn.append((y2, kind, ii, jj, n, h))
     out = []
-    for _, kind, i, j, h in sorted(drawn):
+    for _, kind, i, j, n, h in sorted(drawn):  # back to front, so nearer blocks hide what's behind
         if kind == "pillar":
             x, y = P(i + 1, j + 1)
             out.append(f'<line x1="{x}" y1="{y}" x2="{x}" y2="{y - h:.1f}" class="pillar"/>'
-                       f'<circle cx="{x}" cy="{y - h:.1f}" r="1.8" class="node"/>'
-                       f'<circle cx="{x}" cy="{y}" r="1.4" class="node"/>')
+                       f'<circle cx="{x}" cy="{y - h:.1f}" r="1.8" class="node"/>')
             continue
-        p0, p1, p2, p3 = P(i, j), P(i + 1, j), P(i + 1, j + 1), P(i, j + 1)
+        p0, p1, p2, p3 = P(i, j), P(i + n, j), P(i + n, j + n), P(i, j + n)
         q = [(x, y - h) for x, y in (p0, p1, p2, p3)]
         pts = lambda *ps: " ".join(f"{x:.1f},{y:.1f}" for x, y in ps)
         out.append(f'<polygon points="{pts(q[3], q[2], p2, p3)}" class="side"/>'
                    f'<polygon points="{pts(q[1], q[2], p2, p1)}" class="side"/>'
                    f'<polygon points="{pts(*q)}" class="top"/>')
-        out.extend(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="1.6" class="node"/>' for x, y in (*q, p1, p2, p3))
-    style = (f'.floor{{fill:none;stroke:{color};stroke-width:1;opacity:.5}}'
+        out.extend(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="1.6" class="node"/>' for x, y in q)
+    style = (f'.floor{{fill:none;stroke:{color};stroke-width:1;opacity:.35}}'
              f'.side{{fill:{bg};stroke:{color};stroke-width:1.2;stroke-linejoin:round}}'
-             f'.top{{fill:{mix(bg, color, .35)};stroke:{color};stroke-width:1.2;stroke-linejoin:round}}'
-             f'.pillar{{stroke:{color};stroke-width:1;opacity:.7}}.node{{fill:{bright}}}')
+             f'.top{{fill:{mix(bg, color, .15)};stroke:{color};stroke-width:1.2;stroke-linejoin:round}}'
+             f'.pillar{{stroke:{color};stroke-width:1;opacity:.6}}.node{{fill:{bright}}}')
     return tile(T, bg, style, "".join(floor), extra="".join(out))
 
 

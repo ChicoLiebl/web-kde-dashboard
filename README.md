@@ -92,7 +92,7 @@ are coloured. That covers sessions opened from the dashboard, from `ccm` or by t
 | PCB | `pin-grid`: chip footprints, ball grids and pins over a faint dot grid | `#4a3560` / `#d9c3e6` purple |
 | Firmware | `hex-dump`: scattered columns of hex bytes | `#2f5a3c` / `#bfdcc4` green |
 | Software | `icon-graph`: a network of links with Linux, Git, Python, KDE, Claude, Arch, GitHub, Bash, KiCad, Espressif, C and FreeCAD icons | `#33476b` / `#c2d1ec` blue |
-| CAD / mechanical | `iso-blocks`: wireframe blocks of different heights on an isometric floor | `#5c4a22` / `#e8d39a` amber |
+| CAD / mechanical | `iso-blocks`: wireframe blocks of different sizes and heights, in loose clusters on an isometric floor | `#5c4a22` / `#e8d39a` amber |
 
 - `patterns.py` draws each pattern as a seamless tile on kitty's own background colour. kddash renders
   the tiles it needs into `~/.cache/kddash/patterns/` with `rsvg-convert` (part of librsvg), and again
@@ -316,6 +316,26 @@ Kitty windows that were already open before the change don't have one, so the da
 window on their desktops until you restart them. Windows the dashboard opens always have remote control
 on, so later sessions for that desktop open as tabs in them.
 
+## Sessions marking themselves idle (Claude Code MCP)
+
+`claude_session_mcp.py` is a small MCP server for Claude Code itself, with one tool,
+`mark_this_session_idle`. Ask a session to "set yourself idle" (or tell it you're done with it for now)
+and it marks itself idle on the dashboard.
+
+- **When the mark starts:** the session is still working while it calls the tool, so the mark starts
+  when its turn finishes.
+- **When it clears:** at your next prompt, like a mark set from the dashboard.
+- **Finding the session:** Claude Code runs its MCP servers as child processes, so the server finds its
+  session by walking up to the nearest `claude` process.
+
+It uses only the Python standard library. Register it once for every session:
+
+```bash
+claude mcp add --scope user kddash -- python3 /path/to/kde-desktops-dashboard/claude_session_mcp.py
+```
+
+Sessions that are already running pick it up after `/mcp` → reconnect, or a restart.
+
 ## Voice control (StackChan MCP)
 
 `kddash_mcp.py` is an MCP server (stdio) with these tools:
@@ -405,7 +425,7 @@ Every endpoint except the static files needs `?t=<token>`.
 | `GET /events` | Server-Sent Events stream of the full state (JSON) |
 | `GET /api/state` | Current state as JSON |
 | `POST /api/activate?desktop=<id>` or `?window=<id>` | Switch desktop, or focus a window |
-| `POST /api/snooze?pid=<claude pid>&on=1\|0` | Mark a session idle, or unmark it |
+| `POST /api/snooze?pid=<claude pid>&on=1\|0[&after_turn=1]` | Mark a session idle, or unmark it. `after_turn=1`: from the session itself, idle once its current turn finishes. 404 for an unknown pid |
 | `GET /api/sessions` | Named sessions (saved desktop, running or not) and desktops (empty, has a kitty that accepts tabs) |
 | `POST /api/sessions/desktop?key=<key>&desktop=<n>` | Save a session's desktop (`0` clears it) |
 | `POST /api/launch?key=<key>&desktop=<n>&remember=1\|0` | Open a session on a desktop, as a tab or a new kitty window |
@@ -442,4 +462,5 @@ Every endpoint except the static files needs `?t=<token>`.
 | `kwin/kddash.js` | KWin script that pushes window/desktop snapshots |
 | `static/` | The dashboard page, the crab sprites (`crabs.js`), PWA manifest and icon |
 | `kddash_mcp.py` | Optional MCP server for voice assistants |
+| `claude_session_mcp.py` | MCP server for Claude Code sessions: mark this session idle |
 | `install.sh` | Installs or uninstalls the systemd user service |

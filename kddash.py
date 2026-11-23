@@ -60,6 +60,9 @@ raw_state = None
 broadcast_pending = False
 last_msg = None
 snoozed: dict[int, str] = {}  # claude pid -> status it was marked idle in; cleared when the status changes
+# Sessions that marked themselves idle mid-turn (claude_session_mcp.py): they become idle when the turn
+# finishes, and stay idle until the next prompt like any other mark.
+idle_after_turn: set[int] = set()
 last_title: dict[int, str] = {}  # claude pid -> last task title seen in its window caption
 clients: set[asyncio.Queue] = set()
 bus: MessageBus | None = None
@@ -193,13 +196,16 @@ def session_info(pid, caption, only_session):
     # attributed to this session when it's the window's only Claude session.
     if only_session and from_caption:
         last_title[pid] = caption[1:].strip()
+    if pid in idle_after_turn and status == "done":
+        idle_after_turn.discard(pid)
+        snoozed[pid] = status
     if pid in snoozed and snoozed[pid] != status:
         del snoozed[pid]
     return {
         "pid": pid, "sessionId": meta.get("sessionId"), "cwd": cwd, "project": Path(cwd).name or cwd,
         "title": last_title.get(pid) or meta.get("name") or "",
         "waitingFor": meta.get("waitingFor"),
-        "status": status, "snoozed": pid in snoozed,
+        "status": status, "snoozed": pid in snoozed, "idleAfterTurn": pid in idle_after_turn,
         "kind": session_kind(cwd, meta.get("name") or ""),
         "activity": transcript_activity(meta.get("sessionId")) if status == "working" else None,
     }
@@ -398,6 +404,7 @@ def enrich(raw):
     for d in (snoozed, last_title):  # forget sessions that have exited
         for pid in d.keys() - seen:
             del d[pid]
+    idle_after_turn.intersection_update(seen)
     return {**raw, "windows": windows, "host": socket.gethostname()}
 
 
@@ -457,15 +464,23 @@ async def poll():
             print("kitty backgrounds:", e, file=sys.stderr)
 
 
-def snooze(pid, on):
+def snooze(pid, on, after_turn=False):
+    """Mark a session idle (or not). `after_turn`: the session asked this itself, mid-turn, so the
+    mark starts when its turn finishes. Returns False when there is no such session."""
+    found = False
     for w in state["windows"]:
         for sess in w.get("claude", []):
             if sess["pid"] == pid:
-                if on:
-                    snoozed[pid] = sess["status"]
-                else:
+                found = True
+                if not on:
                     snoozed.pop(pid, None)
+                    idle_after_turn.discard(pid)
+                elif after_turn and sess["status"] != "done":
+                    idle_after_turn.add(pid)
+                else:
+                    snoozed[pid] = sess["status"]
     broadcast()
+    return found
 
 
 async def kwin_call(path, iface, member, signature="", body=()):
@@ -845,7 +860,9 @@ async def handle(reader, writer):
             return await respond(writer, "204 No Content")
 
         if path == "/api/snooze" and method_ == "POST":
-            snooze(int(q.get("pid", 0)), q.get("on") == "1")
+            if not snooze(int(q.get("pid", 0)), q.get("on") == "1", q.get("after_turn") == "1"):
+                return await respond(writer, "404 Not Found", json.dumps({"error": "no such Claude session"}),
+                                     "application/json")
             return await respond(writer, "204 No Content")
 
         if path == "/api/kitty-colors":
